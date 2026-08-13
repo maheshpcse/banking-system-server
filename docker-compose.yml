@@ -1,0 +1,58 @@
+# =============================================================================
+# Local dev stack: MongoDB + banking-system-server
+# From repo root:
+#   cp .env.example .env   # edit secrets
+#   docker compose up -d --build
+# Health: http://localhost:3000/api/v1/health/live
+# =============================================================================
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: banking-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-rootpass}
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE:-banking}
+    ports:
+      - "${MONGO_PUBLISH_PORT:-27017}:27017"
+    volumes:
+      - banking_mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  banking-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: banking-server
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_PORT: ${APP_PORT:-3000}
+      USE_MEMORY_DB: "false"
+      MONGODB_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-root}:${MONGO_INITDB_ROOT_PASSWORD:-rootpass}@mongodb:27017/${MONGO_INITDB_DATABASE:-banking}?authSource=admin
+    ports:
+      - "${APP_PUBLISH_PORT:-3000}:3000"
+    volumes:
+      - banking_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/v1/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  banking_mongo_data:
+  banking_logs:

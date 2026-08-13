@@ -1,0 +1,14 @@
+# Railway config — banking-system-server
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+watchPatterns = ["src/**", "Dockerfile", "railway.toml", "package.json"]
+
+[deploy]
+# PORT is injected by Railway; app reads process.env.PORT
+healthcheckPath = "/api/v1/health/live"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
