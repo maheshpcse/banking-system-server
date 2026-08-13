@@ -4,10 +4,10 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 let memoryServer;
 
 async function connectDB() {
-  const useMemory = process.env.USE_MEMORY_DB !== 'false';
   const uri = process.env.MONGODB_URI;
+  const useMemory = process.env.USE_MEMORY_DB !== 'false';
 
-  if (uri && !useMemory) {
+  if (uri && uri.trim() !== '' && !useMemory) {
     await mongoose.connect(uri);
     console.log('Connected to MongoDB');
     return;

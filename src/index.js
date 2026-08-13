@@ -43,6 +43,10 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'minimal-banking-api' });
 });
 
+app.get('/api/v1/health/live', (_req, res) => {
+  res.json({ status: 'ok', service: 'banking-system-server' });
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/transactions', transactionRoutes);
