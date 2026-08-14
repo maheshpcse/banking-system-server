@@ -57,8 +57,13 @@ app.use((err, _req, res, _next) => {
 });
 
 async function bootstrap() {
-  await connectDB();
-  app.listen(PORT, () => {
+  try {
+    await connectDB();
+  } catch (error) {
+    console.warn('Database initialization failed; continuing to start the API for health checks.', error.message);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Banking API listening on http://localhost:${PORT}`);
   });
 }
