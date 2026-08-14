@@ -10,6 +10,16 @@ const userSchema = new mongoose.Schema(
       minlength: 2,
       maxlength: 80
     },
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+      minlength: 3,
+      maxlength: 32,
+      match: [/^[a-z0-9._-]+$/, 'Username may only contain letters, numbers, dots, underscores, and hyphens']
+    },
     email: {
       type: String,
       required: true,
@@ -31,6 +41,23 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 1000,
       min: 0
+    },
+    avatar: {
+      style: {
+        type: String,
+        enum: ['mint', 'sky', 'sand', 'rose', 'slate'],
+        default: 'mint'
+      },
+      initials: {
+        type: String,
+        default: ''
+      }
+    },
+    settings: {
+      emailAlerts: { type: Boolean, default: true },
+      hideBalance: { type: Boolean, default: false },
+      compactLedger: { type: Boolean, default: false },
+      marketingTips: { type: Boolean, default: false }
     }
   },
   { timestamps: true }
@@ -50,12 +77,33 @@ userSchema.methods.comparePassword = function comparePassword(candidate) {
 };
 
 userSchema.methods.toSafeJSON = function toSafeJSON() {
+  const initials =
+    (this.avatar && this.avatar.initials) ||
+    String(this.fullName || '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join('')
+      .toUpperCase();
+
   return {
     id: this._id.toString(),
     fullName: this.fullName,
+    username: this.username,
     email: this.email,
     accountNumber: this.accountNumber,
     balance: this.balance,
+    avatar: {
+      style: (this.avatar && this.avatar.style) || 'mint',
+      initials: initials || 'NB'
+    },
+    settings: {
+      emailAlerts: this.settings?.emailAlerts !== false,
+      hideBalance: !!this.settings?.hideBalance,
+      compactLedger: !!this.settings?.compactLedger,
+      marketingTips: !!this.settings?.marketingTips
+    },
     createdAt: this.createdAt
   };
 };
