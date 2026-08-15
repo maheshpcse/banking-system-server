@@ -1,5 +1,4 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
@@ -57,191 +56,185 @@ router.get('/summary', async (req, res) => {
   }
 });
 
+/**
+ * Deposit / withdraw / transfer intentionally avoid MongoDB multi-document
+ * transactions. Standalone MongoDB (common on Railway / Atlas free / docker
+ * single-node) rejects sessions with:
+ * "Transaction numbers are only allowed on a replica set member or mongos"
+ */
 router.post('/deposit', async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const amount = roundMoney(req.body.amount);
     const description = (req.body.description || 'Deposit').trim();
 
     if (!amount || amount <= 0) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Enter a valid deposit amount' });
     }
 
-    const user = await User.findById(req.user._id).session(session);
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+
+    const previousBalance = user.balance;
     user.balance = roundMoney(user.balance + amount);
-    await user.save({ session });
+    await user.save();
 
-    const [tx] = await Transaction.create(
-      [
-        {
-          user: user._id,
-          type: 'deposit',
-          amount,
-          balanceAfter: user.balance,
-          description,
-          reference: generateReference('DEP')
-        }
-      ],
-      { session }
-    );
+    try {
+      const tx = await Transaction.create({
+        user: user._id,
+        type: 'deposit',
+        amount,
+        balanceAfter: user.balance,
+        description,
+        reference: generateReference('DEP')
+      });
 
-    await session.commitTransaction();
-    return res.status(201).json({
-      message: 'Deposit successful',
-      user: user.toSafeJSON(),
-      transaction: tx
-    });
+      return res.status(201).json({
+        message: 'Deposit successful',
+        user: user.toSafeJSON(),
+        transaction: tx
+      });
+    } catch (txError) {
+      user.balance = previousBalance;
+      await user.save();
+      throw txError;
+    }
   } catch (error) {
-    await session.abortTransaction();
     console.error('Deposit error:', error);
     return res.status(500).json({ message: 'Deposit failed' });
-  } finally {
-    session.endSession();
   }
 });
 
 router.post('/withdraw', async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const amount = roundMoney(req.body.amount);
     const description = (req.body.description || 'Withdrawal').trim();
 
     if (!amount || amount <= 0) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Enter a valid withdrawal amount' });
     }
 
-    const user = await User.findById(req.user._id).session(session);
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+
     if (user.balance < amount) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
+    const previousBalance = user.balance;
     user.balance = roundMoney(user.balance - amount);
-    await user.save({ session });
+    await user.save();
 
-    const [tx] = await Transaction.create(
-      [
-        {
-          user: user._id,
-          type: 'withdraw',
-          amount,
-          balanceAfter: user.balance,
-          description,
-          reference: generateReference('WDR')
-        }
-      ],
-      { session }
-    );
+    try {
+      const tx = await Transaction.create({
+        user: user._id,
+        type: 'withdraw',
+        amount,
+        balanceAfter: user.balance,
+        description,
+        reference: generateReference('WDR')
+      });
 
-    await session.commitTransaction();
-    return res.status(201).json({
-      message: 'Withdrawal successful',
-      user: user.toSafeJSON(),
-      transaction: tx
-    });
+      return res.status(201).json({
+        message: 'Withdrawal successful',
+        user: user.toSafeJSON(),
+        transaction: tx
+      });
+    } catch (txError) {
+      user.balance = previousBalance;
+      await user.save();
+      throw txError;
+    }
   } catch (error) {
-    await session.abortTransaction();
     console.error('Withdraw error:', error);
     return res.status(500).json({ message: 'Withdrawal failed' });
-  } finally {
-    session.endSession();
   }
 });
 
 router.post('/transfer', async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const amount = roundMoney(req.body.amount);
     const toAccountNumber = String(req.body.toAccountNumber || '').trim().toUpperCase();
     const description = (req.body.description || 'Transfer').trim();
 
     if (!amount || amount <= 0) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Enter a valid transfer amount' });
     }
 
     if (!toAccountNumber) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Recipient account number is required' });
     }
 
-    const sender = await User.findById(req.user._id).session(session);
+    const sender = await User.findById(req.user._id);
+    if (!sender) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+
     if (sender.accountNumber === toAccountNumber) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'You cannot transfer to your own account' });
     }
 
-    const recipient = await User.findOne({ accountNumber: toAccountNumber }).session(session);
+    const recipient = await User.findOne({ accountNumber: toAccountNumber });
     if (!recipient) {
-      await session.abortTransaction();
       return res.status(404).json({ message: 'Recipient account not found' });
     }
 
     if (sender.balance < amount) {
-      await session.abortTransaction();
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
+    const senderPrevious = sender.balance;
+    const recipientPrevious = recipient.balance;
+
     sender.balance = roundMoney(sender.balance - amount);
     recipient.balance = roundMoney(recipient.balance + amount);
-    await sender.save({ session });
-    await recipient.save({ session });
+    await sender.save();
+    await recipient.save();
 
     const outRef = generateReference('OUT');
     const inRef = generateReference('IN');
 
-    const [outTx] = await Transaction.create(
-      [
-        {
-          user: sender._id,
-          type: 'transfer_out',
-          amount,
-          balanceAfter: sender.balance,
-          description,
-          counterpartyAccount: recipient.accountNumber,
-          counterpartyName: recipient.fullName,
-          reference: outRef
-        }
-      ],
-      { session }
-    );
+    try {
+      const outTx = await Transaction.create({
+        user: sender._id,
+        type: 'transfer_out',
+        amount,
+        balanceAfter: sender.balance,
+        description,
+        counterpartyAccount: recipient.accountNumber,
+        counterpartyName: recipient.fullName,
+        reference: outRef
+      });
 
-    await Transaction.create(
-      [
-        {
-          user: recipient._id,
-          type: 'transfer_in',
-          amount,
-          balanceAfter: recipient.balance,
-          description,
-          counterpartyAccount: sender.accountNumber,
-          counterpartyName: sender.fullName,
-          reference: inRef
-        }
-      ],
-      { session }
-    );
+      await Transaction.create({
+        user: recipient._id,
+        type: 'transfer_in',
+        amount,
+        balanceAfter: recipient.balance,
+        description,
+        counterpartyAccount: sender.accountNumber,
+        counterpartyName: sender.fullName,
+        reference: inRef
+      });
 
-    await session.commitTransaction();
-    return res.status(201).json({
-      message: 'Transfer successful',
-      user: sender.toSafeJSON(),
-      transaction: outTx
-    });
+      return res.status(201).json({
+        message: 'Transfer successful',
+        user: sender.toSafeJSON(),
+        transaction: outTx
+      });
+    } catch (txError) {
+      sender.balance = senderPrevious;
+      recipient.balance = recipientPrevious;
+      await sender.save();
+      await recipient.save();
+      throw txError;
+    }
   } catch (error) {
-    await session.abortTransaction();
     console.error('Transfer error:', error);
     return res.status(500).json({ message: 'Transfer failed' });
-  } finally {
-    session.endSession();
   }
 });
 
