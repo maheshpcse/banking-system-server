@@ -256,6 +256,17 @@ router.patch('/profile', auth, async (req, res) => {
         user.avatar = user.avatar || {};
         user.avatar.initials = String(req.body.avatar.initials).trim().slice(0, 3).toUpperCase();
       }
+      if (Object.prototype.hasOwnProperty.call(req.body.avatar, 'image')) {
+        user.avatar = user.avatar || {};
+        const image = req.body.avatar.image;
+        if (image == null || image === '') {
+          user.avatar.image = null;
+        } else if (typeof image === 'string' && image.startsWith('data:image/') && image.length < 1_200_000) {
+          user.avatar.image = image;
+        } else {
+          return res.status(400).json({ message: 'Profile image must be a small image data URL' });
+        }
+      }
     }
 
     if (req.body.settings) {
