@@ -51,6 +51,10 @@ const userSchema = new mongoose.Schema(
       initials: {
         type: String,
         default: ''
+      },
+      image: {
+        type: String,
+        default: null
       }
     },
     settings: {
@@ -96,7 +100,8 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     balance: this.balance,
     avatar: {
       style: (this.avatar && this.avatar.style) || 'mint',
-      initials: initials || 'NB'
+      initials: initials || 'NB',
+      image: (this.avatar && this.avatar.image) || null
     },
     settings: {
       emailAlerts: this.settings?.emailAlerts !== false,
