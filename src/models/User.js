@@ -35,7 +35,35 @@ const userSchema = new mongoose.Schema(
     accountNumber: {
       type: String,
       unique: true,
-      required: true
+      sparse: true,
+      default: null
+    },
+    role: {
+      type: String,
+      enum: ['customer', 'manager', 'admin'],
+      default: 'customer'
+    },
+    accountStatus: {
+      type: String,
+      enum: ['pending', 'address_required', 'under_review', 'approved', 'active', 'rejected', 'blocked', 'deactivated'],
+      default: 'address_required'
+    },
+    address: {
+      line1: String,
+      line2: String,
+      city: String,
+      state: String,
+      postalCode: String,
+      country: String
+    },
+    card: {
+      holderName: String,
+      number: String,
+      expiryMonth: String,
+      expiryYear: String,
+      cvv: String,
+      brand: { type: String, default: 'novabank' },
+      status: { type: String, enum: ['pending', 'active', 'blocked'], default: 'pending' }
     },
     balance: {
       type: Number,
@@ -96,8 +124,22 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     fullName: this.fullName,
     username: this.username,
     email: this.email,
-    accountNumber: this.accountNumber,
+    accountNumber: this.accountNumber || null,
     balance: this.balance,
+    role: this.role || 'customer',
+    accountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
+    address: this.address || null,
+    card: this.card
+      ? {
+          holderName: this.card.holderName,
+          number: this.card.number,
+          expiryMonth: this.card.expiryMonth,
+          expiryYear: this.card.expiryYear,
+          cvv: this.card.cvv,
+          brand: this.card.brand || 'novabank',
+          status: this.card.status || 'pending'
+        }
+      : null,
     avatar: {
       style: (this.avatar && this.avatar.style) || 'mint',
       initials: initials || 'NB',
