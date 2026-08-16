@@ -73,18 +73,15 @@ router.post('/register', async (req, res) => {
       return res.status(409).json({ message: 'This username is already taken' });
     }
 
-    let accountNumber = generateAccountNumber();
-    while (await User.exists({ accountNumber })) {
-      accountNumber = generateAccountNumber();
-    }
-
     const user = await User.create({
       fullName: String(fullName).trim(),
       username: cleanUsername,
       email: cleanEmail,
       password,
-      accountNumber,
-      balance: 1000,
+      accountNumber: null,
+      accountStatus: 'address_required',
+      role: 'customer',
+      balance: 0,
       avatar: {
         style: 'mint',
         initials: String(fullName)
