@@ -8,6 +8,16 @@ const router = express.Router();
 
 router.use(auth);
 
+function requireActiveAccount(user) {
+  if (!user?.accountNumber) {
+    return 'Account number is required before this action. Complete account opening first.';
+  }
+  if (user.accountStatus && !['active', 'approved'].includes(user.accountStatus)) {
+    return 'Account is not active for money movement.';
+  }
+  return null;
+}
+
 router.get('/summary', async (req, res) => {
   try {
     const recent = await Transaction.find({ user: req.user._id })
@@ -75,6 +85,10 @@ router.post('/deposit', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    const blocked = requireActiveAccount(user);
+    if (blocked) {
+      return res.status(403).json({ message: blocked });
+    }
 
     const previousBalance = user.balance;
     user.balance = roundMoney(user.balance + amount);
@@ -120,6 +134,10 @@ router.post('/withdraw', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
+    const blocked = requireActiveAccount(user);
+    if (blocked) {
+      return res.status(403).json({ message: blocked });
+    }
     if (user.balance < amount) {
       return res.status(400).json({ message: 'Insufficient balance' });
     }
@@ -171,6 +189,11 @@ router.post('/transfer', async (req, res) => {
     const sender = await User.findById(req.user._id);
     if (!sender) {
       return res.status(404).json({ message: 'Account not found' });
+    }
+
+    const blocked = requireActiveAccount(sender);
+    if (blocked) {
+      return res.status(403).json({ message: blocked });
     }
 
     if (sender.accountNumber === toAccountNumber) {
@@ -235,6 +258,49 @@ router.post('/transfer', async (req, res) => {
   } catch (error) {
     console.error('Transfer error:', error);
     return res.status(500).json({ message: 'Transfer failed' });
+  }
+});
+
+router.post('/application', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+    const address = req.body.address || {};
+    const card = req.body.card || {};
+    if (!address.line1 || !address.city || !address.state || !address.postalCode || !address.country) {
+      return res.status(400).json({ message: 'Complete residential address is required' });
+    }
+    if (!card.holderName || !card.number || !card.expiryMonth || !card.expiryYear || !card.cvv) {
+      return res.status(400).json({ message: 'Complete card details are required' });
+    }
+    user.address = {
+      line1: String(address.line1).trim(),
+      line2: String(address.line2 || '').trim(),
+      city: String(address.city).trim(),
+      state: String(address.state).trim(),
+      postalCode: String(address.postalCode).trim(),
+      country: String(address.country).trim()
+    };
+    user.card = {
+      holderName: String(card.holderName).trim(),
+      number: String(card.number).replace(/\s+/g, ''),
+      expiryMonth: String(card.expiryMonth),
+      expiryYear: String(card.expiryYear),
+      cvv: String(card.cvv),
+      brand: 'novabank',
+      status: 'pending'
+    };
+    user.accountStatus = 'under_review';
+    await user.save();
+    return res.status(201).json({
+      message: 'Application submitted for manager review.',
+      user: user.toSafeJSON()
+    });
+  } catch (error) {
+    console.error('Application error:', error);
+    return res.status(500).json({ message: 'Unable to submit application' });
   }
 });
 
