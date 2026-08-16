@@ -2,11 +2,27 @@ const express = require('express');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const Notification = require('../models/Notification');
 const { generateReference, roundMoney } = require('../utils/helpers');
 
 const router = express.Router();
 
 router.use(auth);
+
+async function notify(userId, kind, title, body, href) {
+  try {
+    await Notification.create({
+      user: userId,
+      kind,
+      title,
+      body,
+      href: href || null,
+      read: false
+    });
+  } catch (error) {
+    console.warn('Notification create failed:', error.message);
+  }
+}
 
 function requireActiveAccount(user) {
   if (!user?.accountNumber) {
@@ -104,6 +120,14 @@ router.post('/deposit', async (req, res) => {
         reference: generateReference('DEP')
       });
 
+      await notify(
+        user._id,
+        'account',
+        'Deposit successful',
+        `$${amount.toFixed(2)} was added to your available balance.`,
+        '/transactions?type=deposit'
+      );
+
       return res.status(201).json({
         message: 'Deposit successful',
         user: user.toSafeJSON(),
@@ -155,6 +179,14 @@ router.post('/withdraw', async (req, res) => {
         description,
         reference: generateReference('WDR')
       });
+
+      await notify(
+        user._id,
+        'account',
+        'Withdrawal successful',
+        `$${amount.toFixed(2)} was withdrawn from your available balance.`,
+        '/transactions?type=withdraw'
+      );
 
       return res.status(201).json({
         message: 'Withdrawal successful',
@@ -243,6 +275,21 @@ router.post('/transfer', async (req, res) => {
         reference: inRef
       });
 
+      await notify(
+        sender._id,
+        'transfer',
+        'Transfer sent',
+        `$${amount.toFixed(2)} sent to ${recipient.accountNumber}.`,
+        '/transactions?type=transfer_out'
+      );
+      await notify(
+        recipient._id,
+        'transfer',
+        'Transfer received',
+        `$${amount.toFixed(2)} received from ${sender.fullName}.`,
+        '/transactions?type=transfer_in'
+      );
+
       return res.status(201).json({
         message: 'Transfer successful',
         user: sender.toSafeJSON(),
@@ -275,6 +322,13 @@ router.post('/application', async (req, res) => {
     if (!card.holderName || !card.number || !card.expiryMonth || !card.expiryYear || !card.cvv) {
       return res.status(400).json({ message: 'Complete card details are required' });
     }
+
+    const isFirstApplication =
+      !user.accountNumber &&
+      user.accountStatus !== 'under_review' &&
+      user.accountStatus !== 'active' &&
+      user.accountStatus !== 'approved';
+
     user.address = {
       line1: String(address.line1).trim(),
       line2: String(address.line2 || '').trim(),
@@ -290,12 +344,27 @@ router.post('/application', async (req, res) => {
       expiryYear: String(card.expiryYear),
       cvv: String(card.cvv),
       brand: 'novabank',
-      status: 'pending'
+      status: user.card?.status === 'active' ? 'active' : 'pending'
     };
-    user.accountStatus = 'under_review';
+    if (!user.accountNumber) {
+      user.accountStatus = 'under_review';
+    }
     await user.save();
+
+    if (isFirstApplication) {
+      await notify(
+        user._id,
+        'account',
+        'Application submitted',
+        'Your account & card request is under manager review.',
+        '/settings?tab=banking'
+      );
+    }
+
     return res.status(201).json({
-      message: 'Application submitted for manager review.',
+      message: isFirstApplication
+        ? 'Application submitted for manager review.'
+        : 'Card & address updated.',
       user: user.toSafeJSON()
     });
   } catch (error) {
