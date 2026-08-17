@@ -18,13 +18,45 @@ function requireStaff(req, res, next) {
 
 router.use(requireStaff);
 
-router.get('/customers', async (_req, res) => {
+router.get('/customers', async (req, res) => {
   try {
-    const users = await User.find({}).sort({ createdAt: -1 }).limit(200);
-    return res.json({ items: users.map((u) => u.toSafeJSON()) });
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '5'), 10) || 5));
+    const filter = {
+      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
+    };
+
+    const total = await User.countDocuments(filter);
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, pages);
+    const skip = (safePage - 1) * limit;
+
+    const users = await User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
+    return res.json({
+      items: users.map((u) => u.toSafeJSON()),
+      pagination: {
+        page: safePage,
+        limit,
+        total,
+        pages
+      }
+    });
   } catch (error) {
     console.error('Admin list customers error:', error);
     return res.status(500).json({ message: 'Unable to load customers' });
+  }
+});
+
+router.get('/customers/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    return res.json({ user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Admin get customer error:', error);
+    return res.status(500).json({ message: 'Unable to load customer' });
   }
 });
 
