@@ -273,6 +273,12 @@ router.patch('/profile', auth, async (req, res) => {
           user.settings[key] = req.body.settings[key];
         }
       });
+      if (['daylight', 'midnight', 'sand'].includes(req.body.settings.theme)) {
+        user.settings.theme = req.body.settings.theme;
+      }
+      if (['comfortable', 'compact', 'large'].includes(req.body.settings.fontScale)) {
+        user.settings.fontScale = req.body.settings.fontScale;
+      }
     }
 
     await user.save();
