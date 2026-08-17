@@ -8,7 +8,7 @@ watchPatterns = ["src/**", "Dockerfile", "railway.toml", "package.json"]
 
 [deploy]
 # PORT is injected by Railway; app reads process.env.PORT
-startCommand = "bash -lc 'if [ -n \"$MONGODB_URI\" ] || [ -n \"$MONGO_URI\" ]; then echo \"Running admin seed...\"; node src/config/scripts/seed-admin.js || true; else echo \"No MongoDB URI configured; skipping admin seed.\"; fi; exec node src/index.js'"
+startCommand = "sh -c 'if [ -n \"$MONGODB_URI\" ] || [ -n \"$MONGO_URI\" ]; then echo \"Running admin seed...\"; node src/config/scripts/seed-admin.js || true; else echo \"No MongoDB URI configured; skipping admin seed.\"; fi; exec node src/index.js'"
 healthcheckPath = "/api/v1/health/live"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
