@@ -276,7 +276,27 @@ router.patch('/profile', auth, async (req, res) => {
     }
 
     await user.save();
-    return res.json({ message: 'Profile updated', user: user.toSafeJSON() });
+
+    let message = 'Profile updated';
+    const onlySettings =
+      !!req.body.settings &&
+      req.body.fullName == null &&
+      req.body.username == null &&
+      req.body.email == null &&
+      !req.body.avatar;
+    const onlyAvatar =
+      !!req.body.avatar &&
+      req.body.fullName == null &&
+      req.body.username == null &&
+      req.body.email == null &&
+      !req.body.settings;
+    if (onlySettings) {
+      message = 'Preferences saved.';
+    } else if (onlyAvatar) {
+      message = 'Avatar updated.';
+    }
+
+    return res.json({ message, user: user.toSafeJSON() });
   } catch (error) {
     console.error('Profile update error:', error);
     return res.status(500).json({ message: 'Unable to update profile' });
