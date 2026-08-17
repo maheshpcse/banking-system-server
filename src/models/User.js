@@ -62,7 +62,18 @@ const userSchema = new mongoose.Schema(
       expiryMonth: String,
       expiryYear: String,
       cvv: String,
-      brand: { type: String, default: 'novabank' },
+      brand: {
+        type: String,
+        enum: ['novabank', 'visa', 'mastercard', 'amex', 'discover'],
+        default: 'visa'
+      },
+      accountType: {
+        type: String,
+        enum: ['savings', 'credit', 'debit', 'personal', 'business', 'other'],
+        default: 'personal'
+      },
+      accountExpiryMonth: String,
+      accountExpiryYear: String,
       status: { type: String, enum: ['pending', 'active', 'blocked'], default: 'pending' }
     },
     balance: {
@@ -89,7 +100,17 @@ const userSchema = new mongoose.Schema(
       emailAlerts: { type: Boolean, default: true },
       hideBalance: { type: Boolean, default: false },
       compactLedger: { type: Boolean, default: false },
-      marketingTips: { type: Boolean, default: false }
+      marketingTips: { type: Boolean, default: false },
+      theme: {
+        type: String,
+        enum: ['daylight', 'midnight', 'sand'],
+        default: 'daylight'
+      },
+      fontScale: {
+        type: String,
+        enum: ['comfortable', 'compact', 'large'],
+        default: 'comfortable'
+      }
     }
   },
   { timestamps: true }
@@ -136,7 +157,10 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
           expiryMonth: this.card.expiryMonth,
           expiryYear: this.card.expiryYear,
           cvv: this.card.cvv,
-          brand: this.card.brand || 'novabank',
+          brand: this.card.brand || 'visa',
+          accountType: this.card.accountType || 'personal',
+          accountExpiryMonth: this.card.accountExpiryMonth || this.card.expiryMonth || null,
+          accountExpiryYear: this.card.accountExpiryYear || this.card.expiryYear || null,
           status: this.card.status || 'pending'
         }
       : null,
@@ -149,7 +173,9 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
       emailAlerts: this.settings?.emailAlerts !== false,
       hideBalance: !!this.settings?.hideBalance,
       compactLedger: !!this.settings?.compactLedger,
-      marketingTips: !!this.settings?.marketingTips
+      marketingTips: !!this.settings?.marketingTips,
+      theme: this.settings?.theme || 'daylight',
+      fontScale: this.settings?.fontScale || 'comfortable'
     },
     createdAt: this.createdAt
   };
