@@ -31,4 +31,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${APP_PORT:-3000}/api/v1/health/live" || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "src/index.js"]
+CMD ["bash", "-lc", "if [ -n \"$MONGODB_URI\" ] || [ -n \"$MONGO_URI\" ]; then echo \"Running admin seed...\"; node src/config/scripts/seed-admin.js || true; else echo \"No MongoDB URI configured; skipping admin seed.\"; fi; exec node src/index.js"]

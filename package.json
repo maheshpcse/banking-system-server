@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bash start.sh",
     "dev": "nodemon --exec \"bash start.sh\"",
-    "start:raw": "node src/index.js"
+    "start:raw": "node src/index.js",
+    "seed:admin": "node src/config/scripts/seed-admin.js"
   },
   "keywords": ["banking", "mean", "express", "mongodb"],
   "author": "",
