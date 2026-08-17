@@ -4,7 +4,7 @@
   "description": "Minimal Banking System API (Express + MongoDB)",
   "main": "src/index.js",
   "scripts": {
-    "start": "bash start.sh",
+    "start": "node src/index.js",
     "dev": "nodemon --exec \"bash start.sh\"",
     "start:raw": "node src/index.js",
     "seed:admin": "node src/config/scripts/seed-admin.js"
