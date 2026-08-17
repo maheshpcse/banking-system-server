@@ -1,12 +1,12 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 SSL_DIR="${ROOT_DIR}/.local-ssl"
 
 # Ubuntu 24.04+ ships OpenSSL 3; older MongoDB binaries need libssl1.1.
-if [[ ! -f /lib/x86_64-linux-gnu/libcrypto.so.1.1 && ! -f /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 ]]; then
-  if [[ ! -f "${SSL_DIR}/usr/lib/x86_64-linux-gnu/libcrypto.so.1.1" ]]; then
+if [ ! -f /lib/x86_64-linux-gnu/libcrypto.so.1.1 ] && [ ! -f /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 ]; then
+  if [ ! -f "${SSL_DIR}/usr/lib/x86_64-linux-gnu/libcrypto.so.1.1" ]; then
     echo "Preparing local OpenSSL 1.1 libraries for MongoDB memory server..."
     mkdir -p "${SSL_DIR}"
     TMP_DEB="$(mktemp /tmp/libssl1.1.XXXXXX.deb)"
@@ -19,7 +19,7 @@ if [[ ! -f /lib/x86_64-linux-gnu/libcrypto.so.1.1 && ! -f /usr/lib/x86_64-linux-
 fi
 
 cd "${ROOT_DIR}"
-if [[ ! -f .env ]]; then
+if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
