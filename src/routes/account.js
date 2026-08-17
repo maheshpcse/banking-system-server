@@ -34,6 +34,53 @@ function requireActiveAccount(user) {
   return null;
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+router.get('/directory', async (req, res) => {
+  try {
+    const q = String(req.query.q || '')
+      .trim()
+      .toUpperCase();
+    if (q.length < 2) {
+      return res.json({ items: [] });
+    }
+
+    const users = await User.find({
+      _id: { $ne: req.user._id },
+      role: 'customer',
+      accountNumber: { $ne: null, $regex: `^${escapeRegex(q)}` },
+      accountStatus: { $in: ['active', 'approved'] }
+    })
+      .select('fullName accountNumber')
+      .limit(8)
+      .lean();
+
+    return res.json({
+      items: users.map((user) => {
+        const parts = String(user.fullName || '')
+          .split(/\s+/)
+          .filter(Boolean);
+        const displayName =
+          parts.length <= 1
+            ? parts[0] || 'Customer'
+            : `${parts[0]} ${parts
+                .slice(1)
+                .map((p) => `${p[0]}.`)
+                .join(' ')}`;
+        return {
+          accountNumber: user.accountNumber,
+          displayName
+        };
+      })
+    });
+  } catch (error) {
+    console.error('Directory lookup error:', error);
+    return res.status(500).json({ message: 'Unable to look up accounts' });
+  }
+});
+
 router.get('/summary', async (req, res) => {
   try {
     const recent = await Transaction.find({ user: req.user._id })
@@ -343,7 +390,10 @@ router.post('/application', async (req, res) => {
       expiryMonth: String(card.expiryMonth),
       expiryYear: String(card.expiryYear),
       cvv: String(card.cvv),
-      brand: 'novabank',
+      brand: String(card.brand || 'visa').toLowerCase(),
+      accountType: String(card.accountType || 'personal').toLowerCase(),
+      accountExpiryMonth: String(card.accountExpiryMonth || card.expiryMonth),
+      accountExpiryYear: String(card.accountExpiryYear || card.expiryYear),
       status: user.card?.status === 'active' ? 'active' : 'pending'
     };
     if (!user.accountNumber) {
