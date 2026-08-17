@@ -23,12 +23,7 @@ async function main() {
   }
 
   // Prefer the server app User model when this script lives in the server repo.
-  let User;
-  try {
-    User = require('../models/User');
-  } catch {
-    User = require('../../src/models/User');
-  }
+  const User = require('../../models/User');
 
   const email = String(process.env.ADMIN_EMAIL || 'admin@novabank.local').toLowerCase().trim();
   const username = String(process.env.ADMIN_USERNAME || 'admin').toLowerCase().trim();
