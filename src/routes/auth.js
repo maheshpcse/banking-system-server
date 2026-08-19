@@ -1,10 +1,60 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 const { generateAccountNumber } = require('../utils/helpers');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
+
+const THEMES = User.THEMES || ['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid', 'aurora', 'forest', 'ember', 'mist'];
+const FONTS = User.FONTS || ['comfortable', 'compact', 'large', 'editorial', 'technical'];
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AED', 'JPY', 'CAD', 'AUD'];
+const COLOR_MODES = ['light', 'dark'];
+
+async function notifySuperAdmins(kind, title, body, href) {
+  try {
+    const supers = await User.find({ isSuperAdmin: true, staffStatus: 'active' }).select('_id');
+    await Promise.all(
+      supers.map((admin) =>
+        Notification.create({
+          user: admin._id,
+          kind,
+          title,
+          body,
+          href: href || '/admin/staff',
+          read: false
+        })
+      )
+    );
+  } catch (error) {
+    console.warn('Super Admin notify failed:', error.message);
+  }
+}
+
+async function notifyManagers(kind, title, body, href) {
+  try {
+    const managers = await User.find({
+      role: 'manager',
+      staffStatus: 'active',
+      isSuperAdmin: { $ne: true }
+    }).select('_id');
+    await Promise.all(
+      managers.map((mgr) =>
+        Notification.create({
+          user: mgr._id,
+          kind,
+          title,
+          body,
+          href: href || '/manager/approvals',
+          read: false
+        })
+      )
+    );
+  } catch (error) {
+    console.warn('Manager notify failed:', error.message);
+  }
+}
 
 function signToken(user) {
   return jwt.sign(
@@ -161,6 +211,13 @@ router.post('/register-staff', async (req, res) => {
           .toUpperCase()
       }
     });
+
+    await notifySuperAdmins(
+      'admin',
+      'New staff access request',
+      `${user.fullName} registered as ${cleanRole} and is waiting for approval.`,
+      '/admin/staff'
+    );
 
     return res.status(201).json({
       message:
@@ -406,11 +463,24 @@ router.patch('/profile', auth, async (req, res) => {
           user.settings[key] = req.body.settings[key];
         }
       });
-      if (['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid'].includes(req.body.settings.theme)) {
+      if (THEMES.includes(req.body.settings.theme)) {
         user.settings.theme = req.body.settings.theme;
       }
-      if (['comfortable', 'compact', 'large', 'editorial', 'technical'].includes(req.body.settings.fontScale)) {
+      if (FONTS.includes(req.body.settings.fontScale)) {
         user.settings.fontScale = req.body.settings.fontScale;
+      }
+      if (COLOR_MODES.includes(req.body.settings.colorMode)) {
+        user.settings.colorMode = req.body.settings.colorMode;
+      }
+      if (req.body.settings.currency != null) {
+        const currency = String(req.body.settings.currency).trim().toUpperCase();
+        if (CURRENCIES.includes(currency)) {
+          user.settings.currency = currency;
+        } else if (currency === '' || currency === 'NONE') {
+          user.settings.currency = null;
+        } else {
+          return res.status(400).json({ message: `Unsupported currency. Choose one of: ${CURRENCIES.join(', ')}` });
+        }
       }
     }
 

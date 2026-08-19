@@ -22,9 +22,20 @@ router.get('/customers', async (req, res) => {
   try {
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '5'), 10) || 5));
-    const filter = {
-      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
-    };
+    const scope = String(req.query.scope || '').toLowerCase();
+    const roleFilter = String(req.query.role || '').toLowerCase();
+
+    // Super Admin can list all roles; managers/admins default to customers only.
+    let filter;
+    if (req.user?.isSuperAdmin && (scope === 'all' || roleFilter === 'all')) {
+      filter = {};
+    } else if (req.user?.isSuperAdmin && ['customer', 'manager', 'admin'].includes(roleFilter)) {
+      filter = { role: roleFilter };
+    } else {
+      filter = {
+        $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
+      };
+    }
 
     const total = await User.countDocuments(filter);
     const pages = Math.max(1, Math.ceil(total / limit));
@@ -60,9 +71,62 @@ router.get('/customers/:id', async (req, res) => {
   }
 });
 
-router.get('/requests', async (_req, res) => {
+router.get('/customers/:id/transactions', async (req, res) => {
   try {
-    const users = await User.find({ accountStatus: 'under_review' }).sort({ updatedAt: -1 }).limit(100);
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    let Transaction;
+    try {
+      Transaction = require('../models/Transaction');
+    } catch {
+      return res.json({ items: [], pagination: { page: 1, limit: 20, total: 0, pages: 1 } });
+    }
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
+    const type = String(req.query.type || '');
+    const filter = { user: user._id };
+    if (['deposit', 'withdraw', 'transfer_in', 'transfer_out'].includes(type)) {
+      filter.type = type;
+    }
+    const [items, total] = await Promise.all([
+      Transaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Transaction.countDocuments(filter)
+    ]);
+    return res.json({
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit) || 1
+      }
+    });
+  } catch (error) {
+    console.error('Admin customer transactions error:', error);
+    return res.status(500).json({ message: 'Unable to load customer transactions' });
+  }
+});
+
+router.get('/requests', async (req, res) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const filter = {
+      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
+    };
+    if (status && status !== 'all') {
+      filter.accountStatus = status;
+    } else {
+      filter.accountStatus = {
+        $in: ['under_review', 'active', 'approved', 'rejected', 'address_required', 'blocked', 'deactivated']
+      };
+    }
+    const users = await User.find(filter).sort({ updatedAt: -1 }).limit(150);
     return res.json({
       items: users.map((u) => {
         const safe = u.toSafeJSON();
@@ -104,7 +168,7 @@ router.patch('/customers/:id/status', async (req, res) => {
       user: user._id,
       kind: 'admin',
       title: 'Account status updated',
-      body: `Your NovaBank account is now ${status}.`,
+      body: `Your NovaBank account is now ${status.replace(/_/g, ' ')}.`,
       href: '/settings?tab=banking',
       read: false
     });
@@ -228,6 +292,25 @@ router.get('/staff-pending', requireSuperAdmin, async (_req, res) => {
   }
 });
 
+/** Super Admin — full staff directory (pending / active / rejected) */
+router.get('/staff', requireSuperAdmin, async (req, res) => {
+  try {
+    const status = String(req.query.status || 'all').toLowerCase();
+    const filter = {
+      role: { $in: ['manager', 'admin'] },
+      isSuperAdmin: { $ne: true }
+    };
+    if (status && status !== 'all') {
+      filter.staffStatus = status;
+    }
+    const users = await User.find(filter).sort({ createdAt: -1 }).limit(200);
+    return res.json({ items: users.map((u) => u.toSafeJSON()) });
+  } catch (error) {
+    console.error('Staff list error:', error);
+    return res.status(500).json({ message: 'Unable to load staff directory' });
+  }
+});
+
 router.post('/staff/:userId/approve', requireSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
@@ -259,6 +342,14 @@ router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
     }
     user.staffStatus = 'rejected';
     await user.save();
+    await Notification.create({
+      user: user._id,
+      kind: 'admin',
+      title: 'Staff access declined',
+      body: 'Your NovaBank staff registration was not approved. Contact your Super Admin for next steps.',
+      href: '/auth/staff-status',
+      read: false
+    });
     return res.json({ message: 'Staff registration rejected', user: user.toSafeJSON() });
   } catch (error) {
     console.error('Staff reject error:', error);
@@ -374,11 +465,18 @@ router.get('/analytics', async (_req, res) => {
     const customerFilter = {
       $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
     };
-    const [total, active, underReview, blocked] = await Promise.all([
+    const staffFilter = {
+      role: { $in: ['manager', 'admin'] },
+      isSuperAdmin: { $ne: true }
+    };
+    const [total, active, underReview, blocked, managers, admins, staffPending] = await Promise.all([
       User.countDocuments(customerFilter),
       User.countDocuments({ ...customerFilter, accountStatus: { $in: ['active', 'approved'] } }),
       User.countDocuments({ ...customerFilter, accountStatus: 'under_review' }),
-      User.countDocuments({ ...customerFilter, accountStatus: { $in: ['blocked', 'deactivated'] } })
+      User.countDocuments({ ...customerFilter, accountStatus: { $in: ['blocked', 'deactivated'] } }),
+      User.countDocuments({ role: 'manager', isSuperAdmin: { $ne: true } }),
+      User.countDocuments({ role: 'admin', isSuperAdmin: { $ne: true } }),
+      User.countDocuments({ ...staffFilter, staffStatus: 'pending_approval' })
     ]);
 
     const since = new Date();
@@ -408,6 +506,7 @@ router.get('/analytics', async (_req, res) => {
 
     return res.json({
       customers: { total, active, underReview, blocked },
+      staff: { managers, admins, pending: staffPending },
       volumeByType: volumeByType.map((row) => ({
         type: row._id,
         total: row.total,
