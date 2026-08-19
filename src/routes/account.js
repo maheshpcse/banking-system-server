@@ -4,6 +4,14 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Notification = require('../models/Notification');
 const { generateReference, roundMoney } = require('../utils/helpers');
+const {
+  moneyGate,
+  assertDailyLimit,
+  assertUniqueCardCombo,
+  isExpiryCurrentOrFuture,
+  normalizeCardNumber,
+  sumToday
+} = require('../utils/banking-rules');
 
 const router = express.Router();
 
@@ -25,13 +33,7 @@ async function notify(userId, kind, title, body, href) {
 }
 
 function requireActiveAccount(user) {
-  if (!user?.accountNumber) {
-    return 'Account number is required before this action. Complete account opening first.';
-  }
-  if (user.accountStatus && !['active', 'approved'].includes(user.accountStatus)) {
-    return 'Account is not active for money movement.';
-  }
-  return null;
+  return moneyGate(user);
 }
 
 function escapeRegex(value) {
@@ -113,6 +115,13 @@ router.get('/summary', async (req, res) => {
       return acc;
     }, {});
 
+    const [depositToday, withdrawToday, transferToday] = await Promise.all([
+      sumToday(Transaction, req.user._id, ['deposit']),
+      sumToday(Transaction, req.user._id, ['withdraw']),
+      sumToday(Transaction, req.user._id, ['transfer_out'])
+    ]);
+    const limits = req.user.toSafeJSON().limits;
+
     return res.json({
       user: req.user.toSafeJSON(),
       recentTransactions: recent,
@@ -121,6 +130,16 @@ router.get('/summary', async (req, res) => {
         withdrawals: monthlyMap.withdraw || { total: 0, count: 0 },
         transfersIn: monthlyMap.transfer_in || { total: 0, count: 0 },
         transfersOut: monthlyMap.transfer_out || { total: 0, count: 0 }
+      },
+      dailyUsage: {
+        deposit: { used: depositToday.total, limit: limits.depositDaily },
+        withdraw: { used: withdrawToday.total, limit: limits.withdrawDaily },
+        transfer: {
+          used: transferToday.total,
+          limit: limits.transferDaily,
+          count: transferToday.count,
+          countLimit: limits.transferCountDaily
+        }
       }
     });
   } catch (error) {
@@ -151,6 +170,11 @@ router.post('/deposit', async (req, res) => {
     const blocked = requireActiveAccount(user);
     if (blocked) {
       return res.status(403).json({ message: blocked });
+    }
+
+    const limitHit = await assertDailyLimit(Transaction, user, 'deposit', amount);
+    if (limitHit) {
+      return res.status(400).json({ message: limitHit });
     }
 
     const previousBalance = user.balance;
@@ -205,12 +229,17 @@ router.post('/withdraw', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
-    const blocked = requireActiveAccount(user);
+    const blocked = moneyGate(user, { requireAtm: true });
     if (blocked) {
       return res.status(403).json({ message: blocked });
     }
     if (user.balance < amount) {
       return res.status(400).json({ message: 'Insufficient balance' });
+    }
+
+    const limitHit = await assertDailyLimit(Transaction, user, 'withdraw', amount);
+    if (limitHit) {
+      return res.status(400).json({ message: limitHit });
     }
 
     const previousBalance = user.balance;
@@ -283,9 +312,23 @@ router.post('/transfer', async (req, res) => {
     if (!recipient) {
       return res.status(404).json({ message: 'Recipient account not found' });
     }
+    if ((recipient.role || 'customer') !== 'customer') {
+      return res.status(400).json({ message: 'Recipient must be an active customer account' });
+    }
+    if (!['active', 'approved'].includes(recipient.accountStatus || '')) {
+      return res.status(400).json({ message: 'Recipient account is not active' });
+    }
+    if (!isExpiryCurrentOrFuture(recipient.card?.accountExpiryMonth, recipient.card?.accountExpiryYear)) {
+      return res.status(400).json({ message: 'Recipient account validity has expired' });
+    }
 
     if (sender.balance < amount) {
       return res.status(400).json({ message: 'Insufficient balance' });
+    }
+
+    const limitHit = await assertDailyLimit(Transaction, sender, 'transfer', amount);
+    if (limitHit) {
+      return res.status(400).json({ message: limitHit });
     }
 
     const senderPrevious = sender.balance;
@@ -366,8 +409,27 @@ router.post('/application', async (req, res) => {
     if (!address.line1 || !address.city || !address.state || !address.postalCode || !address.country) {
       return res.status(400).json({ message: 'Complete residential address is required' });
     }
-    if (!card.holderName || !card.number || !card.expiryMonth || !card.expiryYear || !card.cvv) {
-      return res.status(400).json({ message: 'Complete card details are required' });
+    if (
+      !card.holderName ||
+      !card.number ||
+      !card.expiryMonth ||
+      !card.expiryYear ||
+      !card.cvv ||
+      !card.accountExpiryMonth ||
+      !card.accountExpiryYear
+    ) {
+      return res.status(400).json({ message: 'Complete card and account expiry details are required' });
+    }
+    if (!isExpiryCurrentOrFuture(card.expiryMonth, card.expiryYear)) {
+      return res.status(400).json({ message: 'Card expiry must be the current month or a future date' });
+    }
+    if (!isExpiryCurrentOrFuture(card.accountExpiryMonth, card.accountExpiryYear)) {
+      return res.status(400).json({ message: 'Account expiry must be the current month or a future date' });
+    }
+
+    const duplicate = await assertUniqueCardCombo(User, card.number, card.cvv, user._id);
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate });
     }
 
     const isFirstApplication =
@@ -376,6 +438,7 @@ router.post('/application', async (req, res) => {
       user.accountStatus !== 'active' &&
       user.accountStatus !== 'approved';
 
+    const previousControls = user.card?.controls || {};
     user.address = {
       line1: String(address.line1).trim(),
       line2: String(address.line2 || '').trim(),
@@ -386,15 +449,22 @@ router.post('/application', async (req, res) => {
     };
     user.card = {
       holderName: String(card.holderName).trim(),
-      number: String(card.number).replace(/\s+/g, ''),
+      number: normalizeCardNumber(card.number),
       expiryMonth: String(card.expiryMonth),
       expiryYear: String(card.expiryYear),
-      cvv: String(card.cvv),
+      cvv: String(card.cvv).replace(/\D/g, ''),
       brand: String(card.brand || 'visa').toLowerCase(),
       accountType: String(card.accountType || 'personal').toLowerCase(),
-      accountExpiryMonth: String(card.accountExpiryMonth || card.expiryMonth),
-      accountExpiryYear: String(card.accountExpiryYear || card.expiryYear),
-      status: user.card?.status === 'active' ? 'active' : 'pending'
+      accountExpiryMonth: String(card.accountExpiryMonth),
+      accountExpiryYear: String(card.accountExpiryYear),
+      status: user.card?.status === 'active' ? 'active' : 'pending',
+      controls: {
+        frozen: !!previousControls.frozen,
+        onlinePayments: previousControls.onlinePayments !== false,
+        contactless: previousControls.contactless !== false,
+        international: !!previousControls.international,
+        atmWithdrawals: previousControls.atmWithdrawals !== false
+      }
     };
     if (!user.accountNumber) {
       user.accountStatus = 'under_review';
@@ -420,6 +490,92 @@ router.post('/application', async (req, res) => {
   } catch (error) {
     console.error('Application error:', error);
     return res.status(500).json({ message: 'Unable to submit application' });
+  }
+});
+
+router.patch('/card-controls', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user?.card) {
+      return res.status(400).json({ message: 'Add card details before configuring controls' });
+    }
+    user.card.controls = user.card.controls || {};
+    ['frozen', 'onlinePayments', 'contactless', 'international', 'atmWithdrawals'].forEach((key) => {
+      if (typeof req.body[key] === 'boolean') {
+        user.card.controls[key] = req.body[key];
+      }
+    });
+    if (user.card.controls.frozen) {
+      user.card.status = 'frozen';
+    } else if (user.card.status === 'frozen') {
+      user.card.status = user.accountNumber ? 'active' : 'pending';
+    }
+    await user.save();
+    await notify(
+      user._id,
+      'security',
+      'Card controls updated',
+      user.card.controls.frozen
+        ? 'Your ATM card is frozen. Money movement is paused until you unfreeze it.'
+        : 'Your ATM card control preferences were saved.',
+      '/settings?tab=cardinfo'
+    );
+    return res.json({ message: 'Card controls updated', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Card controls error:', error);
+    return res.status(500).json({ message: 'Unable to update card controls' });
+  }
+});
+
+router.post('/limits/request', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+    if (user.pendingLimitRequest?.status === 'pending') {
+      return res.status(400).json({ message: 'A limit change request is already pending manager review' });
+    }
+    const proposed = {
+      depositDaily: Number(req.body.depositDaily),
+      withdrawDaily: Number(req.body.withdrawDaily),
+      transferDaily: Number(req.body.transferDaily),
+      transferCountDaily: Number(req.body.transferCountDaily)
+    };
+    if (
+      !proposed.depositDaily ||
+      proposed.depositDaily <= 0 ||
+      !proposed.withdrawDaily ||
+      proposed.withdrawDaily <= 0 ||
+      !proposed.transferDaily ||
+      proposed.transferDaily <= 0 ||
+      !proposed.transferCountDaily ||
+      proposed.transferCountDaily < 1
+    ) {
+      return res.status(400).json({ message: 'Enter valid positive limit values' });
+    }
+    user.pendingLimitRequest = {
+      status: 'pending',
+      requestedAt: new Date(),
+      decidedAt: null,
+      reviewNote: null,
+      proposed
+    };
+    await user.save();
+    await notify(
+      user._id,
+      'account',
+      'Limit change submitted',
+      'Your daily limit request is waiting for manager approval.',
+      '/settings?tab=limits'
+    );
+    return res.status(201).json({
+      message: 'Limit change submitted for manager approval.',
+      user: user.toSafeJSON()
+    });
+  } catch (error) {
+    console.error('Limit request error:', error);
+    return res.status(500).json({ message: 'Unable to submit limit request' });
   }
 });
 
