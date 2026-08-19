@@ -18,6 +18,10 @@ function moneyGate(user, { channel = 'online' } = {}) {
   if (user.accountStatus && !['active', 'approved'].includes(user.accountStatus)) {
     return 'Account is not active for money movement.';
   }
+  const currency = String(user.settings?.currency || '').trim().toUpperCase();
+  if (!currency) {
+    return 'Choose your transaction currency in Account → Experience before moving money.';
+  }
   if (!isExpiryCurrentOrFuture(user.card?.accountExpiryMonth, user.card?.accountExpiryYear)) {
     return 'Account number validity has expired. Update Card info and wait for review.';
   }

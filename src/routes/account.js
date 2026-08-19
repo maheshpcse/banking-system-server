@@ -489,6 +489,28 @@ router.post('/application', async (req, res) => {
         'Your account & card request is under manager review.',
         '/settings?tab=banking'
       );
+      try {
+        const reviewers = await User.find({
+          $or: [
+            { role: 'manager', staffStatus: 'active' },
+            { isSuperAdmin: true, staffStatus: 'active' }
+          ]
+        }).select('_id isSuperAdmin');
+        await Promise.all(
+          reviewers.map((staff) =>
+            Notification.create({
+              user: staff._id,
+              kind: 'account',
+              title: 'New account opening request',
+              body: `${user.fullName} submitted an account & card application for review.`,
+              href: staff.isSuperAdmin ? '/admin/requests' : '/manager/approvals',
+              read: false
+            }).catch(() => null)
+          )
+        );
+      } catch (error) {
+        console.warn('Staff application notify failed:', error.message);
+      }
     }
 
     return res.status(201).json({
@@ -584,6 +606,25 @@ router.post('/limits/request', async (req, res) => {
       'Your daily limit request is waiting for manager approval.',
       '/settings?tab=limits'
     );
+    try {
+      const managers = await User.find({
+        $or: [{ role: 'manager', staffStatus: 'active' }, { isSuperAdmin: true, staffStatus: 'active' }]
+      }).select('_id isSuperAdmin');
+      await Promise.all(
+        managers.map((staff) =>
+          Notification.create({
+            user: staff._id,
+            kind: 'account',
+            title: 'Limit change request',
+            body: `${user.fullName} requested new 24-hour deposit / withdraw / transfer limits.`,
+            href: staff.isSuperAdmin ? '/manager/limits' : '/manager/limits',
+            read: false
+          }).catch(() => null)
+        )
+      );
+    } catch (error) {
+      console.warn('Limit request staff notify failed:', error.message);
+    }
     return res.status(201).json({
       message: 'Limit change submitted for manager approval.',
       user: user.toSafeJSON()

@@ -2,8 +2,21 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const { sealCardSecrets, revealCardSecrets } = require('../utils/card-crypto');
 
-const THEMES = ['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid'];
+const THEMES = [
+  'daylight',
+  'midnight',
+  'sand',
+  'ocean',
+  'graphite',
+  'orchid',
+  'aurora',
+  'forest',
+  'ember',
+  'mist'
+];
 const FONTS = ['comfortable', 'compact', 'large', 'editorial', 'technical'];
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AED', 'JPY', 'CAD', 'AUD'];
+const COLOR_MODES = ['light', 'dark'];
 
 const userSchema = new mongoose.Schema(
   {
@@ -172,6 +185,20 @@ const userSchema = new mongoose.Schema(
         type: String,
         enum: FONTS,
         default: 'comfortable'
+      },
+      /** light | dark — navbar toggle; independent of color theme accents */
+      colorMode: {
+        type: String,
+        enum: COLOR_MODES,
+        default: 'light'
+      },
+      /**
+       * Transaction display currency. null/undefined = not configured yet —
+       * money APIs reject until the user picks one in Account → Experience.
+       */
+      currency: {
+        type: String,
+        default: null
       }
     }
   },
@@ -278,7 +305,9 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
       compactLedger: !!this.settings?.compactLedger,
       marketingTips: !!this.settings?.marketingTips,
       theme: this.settings?.theme || 'daylight',
-      fontScale: this.settings?.fontScale || 'comfortable'
+      fontScale: this.settings?.fontScale || 'comfortable',
+      colorMode: this.settings?.colorMode === 'dark' ? 'dark' : 'light',
+      currency: this.settings?.currency || null
     },
     createdAt: this.createdAt
   };
@@ -287,3 +316,5 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
 module.exports = mongoose.model('User', userSchema);
 module.exports.THEMES = THEMES;
 module.exports.FONTS = FONTS;
+module.exports.CURRENCIES = CURRENCIES;
+module.exports.COLOR_MODES = COLOR_MODES;
