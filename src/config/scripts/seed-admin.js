@@ -5,24 +5,19 @@
  * Additional managers/admins should self-register via /auth/staff-signup
  * and wait for Super Admin approval.
  *
- *   ADMIN_ROLE=admin node scripts/seed-admin.js
+ *   npm run seed:admin
+ *   ADMIN_ROLE=admin node src/config/scripts/seed-admin.js
  *   ADMIN_ROLE=manager ADMIN_USERNAME=manager ADMIN_EMAIL=manager@novabank.local node scripts/seed-admin.js
  */
 require('dotenv').config();
 
 const mongoose = require('mongoose');
+const User = require('../../models/User');
 
 async function main() {
   const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!uri) {
     throw new Error('Set MONGODB_URI (or MONGO_URI) before seeding.');
-  }
-
-  let User;
-  try {
-    User = require('../models/User');
-  } catch {
-    User = require('../../src/models/User');
   }
 
   const email = String(process.env.ADMIN_EMAIL || 'admin@novabank.local').toLowerCase().trim();
