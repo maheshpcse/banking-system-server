@@ -81,6 +81,8 @@ router.post('/register', async (req, res) => {
       accountNumber: null,
       accountStatus: 'address_required',
       role: 'customer',
+      staffStatus: 'active',
+      isSuperAdmin: false,
       balance: 0,
       avatar: {
         style: 'mint',
@@ -108,6 +110,120 @@ router.post('/register', async (req, res) => {
   }
 });
 
+/** Staff (manager/admin) signup — pending until Super Admin activates */
+router.post('/register-staff', async (req, res) => {
+  try {
+    const { fullName, username, email, password, role } = req.body;
+    const cleanRole = String(role || '').toLowerCase();
+    if (!['manager', 'admin'].includes(cleanRole)) {
+      return res.status(400).json({ message: 'Role must be manager or admin' });
+    }
+    if (!fullName || !username || !email || !password) {
+      return res.status(400).json({ message: 'Full name, username, email, and password are required' });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    }
+    const cleanUsername = normalizeUsername(username);
+    if (!/^[a-z0-9._-]{3,32}$/.test(cleanUsername)) {
+      return res.status(400).json({
+        message: 'Username must be 3–32 characters (letters, numbers, dots, underscores, hyphens)'
+      });
+    }
+    const cleanEmail = String(email).toLowerCase().trim();
+    if (await User.findOne({ email: cleanEmail })) {
+      return res.status(409).json({ message: 'An account with this email already exists' });
+    }
+    if (await User.findOne({ username: cleanUsername })) {
+      return res.status(409).json({ message: 'This username is already taken' });
+    }
+
+    const user = await User.create({
+      fullName: String(fullName).trim(),
+      username: cleanUsername,
+      email: cleanEmail,
+      password,
+      role: cleanRole,
+      isSuperAdmin: false,
+      staffStatus: 'pending_approval',
+      accountNumber: null,
+      accountStatus: 'active',
+      balance: 0,
+      avatar: {
+        style: 'slate',
+        initials: String(fullName)
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((part) => part[0])
+          .join('')
+          .toUpperCase()
+      }
+    });
+
+    return res.status(201).json({
+      message:
+        'Staff registration received. A Super Admin must approve your access before you can sign in.',
+      user: {
+        id: user._id.toString(),
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        staffStatus: user.staffStatus
+      }
+    });
+  } catch (error) {
+    console.error('Staff register error:', error);
+    if (error && error.code === 11000) {
+      return res.status(409).json({ message: 'Email or username already exists' });
+    }
+    return res.status(500).json({ message: 'Unable to register staff account' });
+  }
+});
+
+/** Public status check for pending staff (no auth) */
+router.post('/staff-status', async (req, res) => {
+  try {
+    const identifier = req.body.identifier || req.body.email || req.body.username;
+    if (!identifier) {
+      return res.status(400).json({ message: 'Enter your username or email' });
+    }
+    const user = await findByIdentifier(identifier);
+    if (!user || !['manager', 'admin'].includes(user.role || '')) {
+      return res.status(404).json({ message: 'No staff registration found for that username or email' });
+    }
+    const status = user.isSuperAdmin ? 'active' : user.staffStatus || 'active';
+    let title = 'Access ready';
+    let detail =
+      'Your staff profile is active. Sign in with the shared NovaBank login to open your portal.';
+  if (status === 'pending_approval') {
+      title = 'Access under verification';
+      detail =
+        'Your NovaBank staff credentials are locked until a Super Admin completes identity review. Typical activation finishes within 24 hours. Check back here anytime — once approved, you can sign in immediately with the same username.';
+    } else if (status === 'rejected') {
+      title = 'Staff access declined';
+      detail =
+        'This registration was not approved for portal access. Contact your NovaBank Super Admin with the username you registered so they can clarify next steps or invite a fresh request.';
+    } else {
+      title = 'Staff access active';
+      detail =
+        'Your manager/admin account is approved and ready. Sign in with your username or email to open the staff portal.';
+    }
+    return res.json({
+      found: true,
+      role: user.role,
+      staffStatus: status,
+      title,
+      detail,
+      canLogin: status === 'active'
+    });
+  } catch (error) {
+    console.error('Staff status error:', error);
+    return res.status(500).json({ message: 'Unable to check staff status' });
+  }
+});
+
 router.post('/login', async (req, res) => {
   try {
     const identifier = req.body.identifier || req.body.email || req.body.username;
@@ -120,6 +236,23 @@ router.post('/login', async (req, res) => {
     const user = await findByIdentifier(identifier);
     if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({ message: 'Invalid username/email or password' });
+    }
+
+    const role = user.role || 'customer';
+    if ((role === 'manager' || role === 'admin') && !user.isSuperAdmin) {
+      if ((user.staffStatus || 'active') === 'pending_approval') {
+        return res.status(403).json({
+          code: 'STAFF_PENDING',
+          message:
+            'Your staff access is awaiting Super Admin verification. Activation usually completes within 24 hours.'
+        });
+      }
+      if (user.staffStatus === 'rejected') {
+        return res.status(403).json({
+          code: 'STAFF_REJECTED',
+          message: 'This staff registration was not approved. Contact NovaBank Super Admin for next steps.'
+        });
+      }
     }
 
     const token = signToken(user);
@@ -273,10 +406,10 @@ router.patch('/profile', auth, async (req, res) => {
           user.settings[key] = req.body.settings[key];
         }
       });
-      if (['daylight', 'midnight', 'sand'].includes(req.body.settings.theme)) {
+      if (['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid'].includes(req.body.settings.theme)) {
         user.settings.theme = req.body.settings.theme;
       }
-      if (['comfortable', 'compact', 'large'].includes(req.body.settings.fontScale)) {
+      if (['comfortable', 'compact', 'large', 'editorial', 'technical'].includes(req.body.settings.fontScale)) {
         user.settings.fontScale = req.body.settings.fontScale;
       }
     }
