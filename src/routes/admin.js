@@ -204,4 +204,214 @@ router.post('/requests/:userId/reject', async (req, res) => {
   }
 });
 
+function requireSuperAdmin(req, res, next) {
+  if (!req.user?.isSuperAdmin) {
+    return res.status(403).json({ message: 'Super Admin access required' });
+  }
+  return next();
+}
+
+router.get('/staff-pending', requireSuperAdmin, async (_req, res) => {
+  try {
+    const users = await User.find({
+      role: { $in: ['manager', 'admin'] },
+      isSuperAdmin: { $ne: true },
+      staffStatus: 'pending_approval'
+    }).sort({ createdAt: -1 });
+    return res.json({ items: users.map((u) => u.toSafeJSON()) });
+  } catch (error) {
+    console.error('Staff pending error:', error);
+    return res.status(500).json({ message: 'Unable to load pending staff' });
+  }
+});
+
+router.post('/staff/:userId/approve', requireSuperAdmin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user || !['manager', 'admin'].includes(user.role || '')) {
+      return res.status(404).json({ message: 'Staff user not found' });
+    }
+    user.staffStatus = 'active';
+    await user.save();
+    await Notification.create({
+      user: user._id,
+      kind: 'admin',
+      title: 'Staff access approved',
+      body: 'Your NovaBank staff portal is active. You can sign in now.',
+      href: '/auth/login',
+      read: false
+    });
+    return res.json({ message: 'Staff user activated', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Staff approve error:', error);
+    return res.status(500).json({ message: 'Unable to approve staff user' });
+  }
+});
+
+router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user || !['manager', 'admin'].includes(user.role || '')) {
+      return res.status(404).json({ message: 'Staff user not found' });
+    }
+    user.staffStatus = 'rejected';
+    await user.save();
+    return res.json({ message: 'Staff registration rejected', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Staff reject error:', error);
+    return res.status(500).json({ message: 'Unable to reject staff user' });
+  }
+});
+
+router.get('/limit-requests', async (_req, res) => {
+  try {
+    const users = await User.find({
+      role: 'customer',
+      'pendingLimitRequest.status': 'pending'
+    }).sort({ 'pendingLimitRequest.requestedAt': -1 });
+    return res.json({
+      items: users.map((u) => ({
+        ...u.toSafeJSON(),
+        pendingLimitRequest: u.pendingLimitRequest
+      }))
+    });
+  } catch (error) {
+    console.error('Limit requests error:', error);
+    return res.status(500).json({ message: 'Unable to load limit requests' });
+  }
+});
+
+router.post('/limit-requests/:userId/approve', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
+      return res.status(404).json({ message: 'No pending limit request' });
+    }
+    const proposed = user.pendingLimitRequest.proposed || {};
+    user.limits = {
+      depositDaily: Number(proposed.depositDaily),
+      withdrawDaily: Number(proposed.withdrawDaily),
+      transferDaily: Number(proposed.transferDaily),
+      transferCountDaily: Number(proposed.transferCountDaily)
+    };
+    user.pendingLimitRequest = {
+      status: 'approved',
+      requestedAt: user.pendingLimitRequest.requestedAt,
+      decidedAt: new Date(),
+      reviewNote: String(req.body.reviewNote || 'Approved').trim(),
+      proposed
+    };
+    await user.save();
+    await Notification.create({
+      user: user._id,
+      kind: 'account',
+      title: 'Limit change approved',
+      body: 'Your new daily deposit, withdraw, and transfer limits are active.',
+      href: '/settings?tab=limits',
+      read: false
+    });
+    return res.json({ message: 'Limit request approved', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Limit approve error:', error);
+    return res.status(500).json({ message: 'Unable to approve limit request' });
+  }
+});
+
+router.post('/limit-requests/:userId/reject', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
+      return res.status(404).json({ message: 'No pending limit request' });
+    }
+    user.pendingLimitRequest = {
+      status: 'rejected',
+      requestedAt: user.pendingLimitRequest.requestedAt,
+      decidedAt: new Date(),
+      reviewNote: String(req.body.reviewNote || 'Not approved').trim(),
+      proposed: user.pendingLimitRequest.proposed
+    };
+    await user.save();
+    await Notification.create({
+      user: user._id,
+      kind: 'account',
+      title: 'Limit change rejected',
+      body: user.pendingLimitRequest.reviewNote,
+      href: '/settings?tab=limits',
+      read: false
+    });
+    return res.json({ message: 'Limit request rejected', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Limit reject error:', error);
+    return res.status(500).json({ message: 'Unable to reject limit request' });
+  }
+});
+
+router.get('/analytics', async (_req, res) => {
+  try {
+    let Transaction;
+    try {
+      Transaction = require('../models/Transaction');
+    } catch {
+      return res.json({
+        customers: { total: 0, active: 0, underReview: 0, blocked: 0 },
+        volumeByType: [],
+        dailyFlow: []
+      });
+    }
+
+    const customerFilter = {
+      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
+    };
+    const [total, active, underReview, blocked] = await Promise.all([
+      User.countDocuments(customerFilter),
+      User.countDocuments({ ...customerFilter, accountStatus: { $in: ['active', 'approved'] } }),
+      User.countDocuments({ ...customerFilter, accountStatus: 'under_review' }),
+      User.countDocuments({ ...customerFilter, accountStatus: { $in: ['blocked', 'deactivated'] } })
+    ]);
+
+    const since = new Date();
+    since.setDate(since.getDate() - 13);
+    since.setHours(0, 0, 0, 0);
+
+    const volumeByType = await Transaction.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: { _id: '$type', total: { $sum: '$amount' }, count: { $sum: 1 } } },
+      { $sort: { total: -1 } }
+    ]);
+
+    const dailyFlow = await Transaction.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: {
+            day: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            type: '$type'
+          },
+          total: { $sum: '$amount' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.day': 1 } }
+    ]);
+
+    return res.json({
+      customers: { total, active, underReview, blocked },
+      volumeByType: volumeByType.map((row) => ({
+        type: row._id,
+        total: row.total,
+        count: row.count
+      })),
+      dailyFlow: dailyFlow.map((row) => ({
+        day: row._id.day,
+        type: row._id.type,
+        total: row.total,
+        count: row.count
+      }))
+    });
+  } catch (error) {
+    console.error('Analytics error:', error);
+    return res.status(500).json({ message: 'Unable to load analytics' });
+  }
+});
+
 module.exports = router;
