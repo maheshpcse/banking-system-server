@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const THEMES = ['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid'];
+const FONTS = ['comfortable', 'compact', 'large', 'editorial', 'technical'];
+
 const userSchema = new mongoose.Schema(
   {
     fullName: {
@@ -43,9 +46,32 @@ const userSchema = new mongoose.Schema(
       enum: ['customer', 'manager', 'admin'],
       default: 'customer'
     },
+    /** First seeded admin only */
+    isSuperAdmin: {
+      type: Boolean,
+      default: false
+    },
+    /**
+     * Staff (manager/admin) must be approved by Super Admin before login.
+     * Customers ignore this (always active).
+     */
+    staffStatus: {
+      type: String,
+      enum: ['active', 'pending_approval', 'rejected'],
+      default: 'active'
+    },
     accountStatus: {
       type: String,
-      enum: ['pending', 'address_required', 'under_review', 'approved', 'active', 'rejected', 'blocked', 'deactivated'],
+      enum: [
+        'pending',
+        'address_required',
+        'under_review',
+        'approved',
+        'active',
+        'rejected',
+        'blocked',
+        'deactivated'
+      ],
       default: 'address_required'
     },
     address: {
@@ -74,7 +100,36 @@ const userSchema = new mongoose.Schema(
       },
       accountExpiryMonth: String,
       accountExpiryYear: String,
-      status: { type: String, enum: ['pending', 'active', 'blocked'], default: 'pending' }
+      status: { type: String, enum: ['pending', 'active', 'blocked', 'frozen'], default: 'pending' },
+      controls: {
+        frozen: { type: Boolean, default: false },
+        onlinePayments: { type: Boolean, default: true },
+        contactless: { type: Boolean, default: true },
+        international: { type: Boolean, default: false },
+        atmWithdrawals: { type: Boolean, default: true }
+      }
+    },
+    limits: {
+      depositDaily: { type: Number, default: 5000, min: 0 },
+      withdrawDaily: { type: Number, default: 2000, min: 0 },
+      transferDaily: { type: Number, default: 3000, min: 0 },
+      transferCountDaily: { type: Number, default: 10, min: 1 }
+    },
+    pendingLimitRequest: {
+      status: {
+        type: String,
+        enum: ['none', 'pending', 'approved', 'rejected'],
+        default: 'none'
+      },
+      requestedAt: Date,
+      decidedAt: Date,
+      reviewNote: String,
+      proposed: {
+        depositDaily: Number,
+        withdrawDaily: Number,
+        transferDaily: Number,
+        transferCountDaily: Number
+      }
     },
     balance: {
       type: Number,
@@ -103,12 +158,12 @@ const userSchema = new mongoose.Schema(
       marketingTips: { type: Boolean, default: false },
       theme: {
         type: String,
-        enum: ['daylight', 'midnight', 'sand'],
+        enum: THEMES,
         default: 'daylight'
       },
       fontScale: {
         type: String,
-        enum: ['comfortable', 'compact', 'large'],
+        enum: FONTS,
         default: 'comfortable'
       }
     }
@@ -148,6 +203,8 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     accountNumber: this.accountNumber || null,
     balance: this.balance,
     role: this.role || 'customer',
+    isSuperAdmin: !!this.isSuperAdmin,
+    staffStatus: this.staffStatus || 'active',
     accountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
     address: this.address || null,
     card: this.card
@@ -161,9 +218,31 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
           accountType: this.card.accountType || 'personal',
           accountExpiryMonth: this.card.accountExpiryMonth || this.card.expiryMonth || null,
           accountExpiryYear: this.card.accountExpiryYear || this.card.expiryYear || null,
-          status: this.card.status || 'pending'
+          status: this.card.status || 'pending',
+          controls: {
+            frozen: !!this.card.controls?.frozen,
+            onlinePayments: this.card.controls?.onlinePayments !== false,
+            contactless: this.card.controls?.contactless !== false,
+            international: !!this.card.controls?.international,
+            atmWithdrawals: this.card.controls?.atmWithdrawals !== false
+          }
         }
       : null,
+    limits: {
+      depositDaily: this.limits?.depositDaily ?? 5000,
+      withdrawDaily: this.limits?.withdrawDaily ?? 2000,
+      transferDaily: this.limits?.transferDaily ?? 3000,
+      transferCountDaily: this.limits?.transferCountDaily ?? 10
+    },
+    pendingLimitRequest: this.pendingLimitRequest
+      ? {
+          status: this.pendingLimitRequest.status || 'none',
+          requestedAt: this.pendingLimitRequest.requestedAt || null,
+          decidedAt: this.pendingLimitRequest.decidedAt || null,
+          reviewNote: this.pendingLimitRequest.reviewNote || null,
+          proposed: this.pendingLimitRequest.proposed || null
+        }
+      : { status: 'none' },
     avatar: {
       style: (this.avatar && this.avatar.style) || 'mint',
       initials: initials || 'NB',
@@ -182,3 +261,5 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
 };
 
 module.exports = mongoose.model('User', userSchema);
+module.exports.THEMES = THEMES;
+module.exports.FONTS = FONTS;
