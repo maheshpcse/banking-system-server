@@ -10,8 +10,10 @@ const {
   assertUniqueCardCombo,
   isExpiryCurrentOrFuture,
   normalizeCardNumber,
-  sumToday
+  sumRolling24h,
+  resolveMoneyChannel
 } = require('../utils/banking-rules');
+const { sealCardSecrets } = require('../utils/card-crypto');
 
 const router = express.Router();
 
@@ -32,8 +34,8 @@ async function notify(userId, kind, title, body, href) {
   }
 }
 
-function requireActiveAccount(user) {
-  return moneyGate(user);
+function requireActiveAccount(user, channel = 'online') {
+  return moneyGate(user, { channel });
 }
 
 function escapeRegex(value) {
@@ -116,9 +118,9 @@ router.get('/summary', async (req, res) => {
     }, {});
 
     const [depositToday, withdrawToday, transferToday] = await Promise.all([
-      sumToday(Transaction, req.user._id, ['deposit']),
-      sumToday(Transaction, req.user._id, ['withdraw']),
-      sumToday(Transaction, req.user._id, ['transfer_out'])
+      sumRolling24h(Transaction, req.user._id, ['deposit']),
+      sumRolling24h(Transaction, req.user._id, ['withdraw']),
+      sumRolling24h(Transaction, req.user._id, ['transfer_out'])
     ]);
     const limits = req.user.toSafeJSON().limits;
 
@@ -132,6 +134,7 @@ router.get('/summary', async (req, res) => {
         transfersOut: monthlyMap.transfer_out || { total: 0, count: 0 }
       },
       dailyUsage: {
+        window: 'rolling_24h',
         deposit: { used: depositToday.total, limit: limits.depositDaily },
         withdraw: { used: withdrawToday.total, limit: limits.withdrawDaily },
         transfer: {
@@ -167,7 +170,8 @@ router.post('/deposit', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
-    const blocked = requireActiveAccount(user);
+    const channel = resolveMoneyChannel(req.body.channel, 'online');
+    const blocked = requireActiveAccount(user, channel);
     if (blocked) {
       return res.status(403).json({ message: blocked });
     }
@@ -229,7 +233,9 @@ router.post('/withdraw', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
-    const blocked = moneyGate(user, { requireAtm: true });
+    const blocked = moneyGate(user, {
+      channel: resolveMoneyChannel(req.body.channel, 'atm')
+    });
     if (blocked) {
       return res.status(403).json({ message: blocked });
     }
@@ -299,7 +305,10 @@ router.post('/transfer', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
-    const blocked = requireActiveAccount(sender);
+    const blocked = requireActiveAccount(
+      sender,
+      resolveMoneyChannel(req.body.channel, 'online')
+    );
     if (blocked) {
       return res.status(403).json({ message: blocked });
     }
@@ -447,7 +456,7 @@ router.post('/application', async (req, res) => {
       postalCode: String(address.postalCode).trim(),
       country: String(address.country).trim()
     };
-    user.card = {
+    const sealed = sealCardSecrets({
       holderName: String(card.holderName).trim(),
       number: normalizeCardNumber(card.number),
       expiryMonth: String(card.expiryMonth),
@@ -465,7 +474,8 @@ router.post('/application', async (req, res) => {
         international: !!previousControls.international,
         atmWithdrawals: previousControls.atmWithdrawals !== false
       }
-    };
+    });
+    user.card = sealed;
     if (!user.accountNumber) {
       user.accountStatus = 'under_review';
     }
@@ -488,6 +498,11 @@ router.post('/application', async (req, res) => {
       user: user.toSafeJSON()
     });
   } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        message: 'This Card Number + CVV combination is already registered to another customer'
+      });
+    }
     console.error('Application error:', error);
     return res.status(500).json({ message: 'Unable to submit application' });
   }
@@ -516,8 +531,8 @@ router.patch('/card-controls', async (req, res) => {
       'security',
       'Card controls updated',
       user.card.controls.frozen
-        ? 'Your ATM card is frozen. Money movement is paused until you unfreeze it.'
-        : 'Your ATM card control preferences were saved.',
+        ? 'Your ATM card is frozen. All money movement is paused until you unfreeze it.'
+        : 'Card controls saved. Online, contactless, international, and ATM flags are enforced on money APIs.',
       '/settings?tab=cardinfo'
     );
     return res.json({ message: 'Card controls updated', user: user.toSafeJSON() });

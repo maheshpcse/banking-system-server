@@ -64,16 +64,19 @@ router.get('/requests', async (_req, res) => {
   try {
     const users = await User.find({ accountStatus: 'under_review' }).sort({ updatedAt: -1 }).limit(100);
     return res.json({
-      items: users.map((u) => ({
-        id: u._id.toString(),
-        userId: u._id.toString(),
-        fullName: u.fullName,
-        email: u.email,
-        submittedAt: u.updatedAt,
-        status: u.accountStatus,
-        address: u.address || null,
-        card: u.card || null
-      }))
+      items: users.map((u) => {
+        const safe = u.toSafeJSON();
+        return {
+          id: safe.id,
+          userId: safe.id,
+          fullName: safe.fullName,
+          email: safe.email,
+          submittedAt: u.updatedAt,
+          status: u.accountStatus,
+          address: safe.address || null,
+          card: safe.card || null
+        };
+      })
     });
   } catch (error) {
     console.error('Admin list requests error:', error);
@@ -263,7 +266,16 @@ router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
   }
 });
 
-router.get('/limit-requests', async (_req, res) => {
+function requireManagerOrSuperAdmin(req, res, next) {
+  if (req.user?.role === 'manager' || req.user?.isSuperAdmin) {
+    return next();
+  }
+  return res.status(403).json({
+    message: 'Manager access required for limit approvals (Super Admin override allowed)'
+  });
+}
+
+router.get('/limit-requests', requireManagerOrSuperAdmin, async (_req, res) => {
   try {
     const users = await User.find({
       role: 'customer',
@@ -281,7 +293,7 @@ router.get('/limit-requests', async (_req, res) => {
   }
 });
 
-router.post('/limit-requests/:userId/approve', async (req, res) => {
+router.post('/limit-requests/:userId/approve', requireManagerOrSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
@@ -317,7 +329,7 @@ router.post('/limit-requests/:userId/approve', async (req, res) => {
   }
 });
 
-router.post('/limit-requests/:userId/reject', async (req, res) => {
+router.post('/limit-requests/:userId/reject', requireManagerOrSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {

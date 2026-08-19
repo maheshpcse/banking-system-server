@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { sealCardSecrets, revealCardSecrets } = require('../utils/card-crypto');
 
 const THEMES = ['daylight', 'midnight', 'sand', 'ocean', 'graphite', 'orchid'];
 const FONTS = ['comfortable', 'compact', 'large', 'editorial', 'technical'];
@@ -84,10 +85,16 @@ const userSchema = new mongoose.Schema(
     },
     card: {
       holderName: String,
+      /** AES-GCM ciphertext (enc:v1:…) — decrypt only in toSafeJSON / authorized views */
       number: String,
       expiryMonth: String,
       expiryYear: String,
+      /** AES-GCM ciphertext */
       cvv: String,
+      /** HMAC of PAN for lookups */
+      numberHash: { type: String, default: null },
+      /** HMAC of PAN+CVV — unique sparse index closes race beyond findOne */
+      comboHash: { type: String, default: null },
       brand: {
         type: String,
         enum: ['novabank', 'visa', 'mastercard', 'amex', 'discover'],
@@ -171,13 +178,25 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-userSchema.pre('save', async function hashPassword(next) {
-  if (!this.isModified('password')) {
-    return next();
+userSchema.index({ 'card.comboHash': 1 }, { unique: true, sparse: true });
+
+userSchema.pre('save', async function hashPasswordAndSealCard(next) {
+  try {
+    if (this.isModified('password')) {
+      const salt = await bcrypt.genSalt(10);
+      this.password = await bcrypt.hash(this.password, salt);
+    }
+    if (this.card && (this.isModified('card') || this.isNew)) {
+      const sealed = sealCardSecrets(this.card.toObject ? this.card.toObject() : { ...this.card });
+      this.card.number = sealed.number;
+      this.card.cvv = sealed.cvv;
+      this.card.numberHash = sealed.numberHash;
+      this.card.comboHash = sealed.comboHash;
+    }
+    next();
+  } catch (error) {
+    next(error);
   }
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-  next();
 });
 
 userSchema.methods.comparePassword = function comparePassword(candidate) {
@@ -208,25 +227,30 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     accountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
     address: this.address || null,
     card: this.card
-      ? {
-          holderName: this.card.holderName,
-          number: this.card.number,
-          expiryMonth: this.card.expiryMonth,
-          expiryYear: this.card.expiryYear,
-          cvv: this.card.cvv,
-          brand: this.card.brand || 'visa',
-          accountType: this.card.accountType || 'personal',
-          accountExpiryMonth: this.card.accountExpiryMonth || this.card.expiryMonth || null,
-          accountExpiryYear: this.card.accountExpiryYear || this.card.expiryYear || null,
-          status: this.card.status || 'pending',
-          controls: {
-            frozen: !!this.card.controls?.frozen,
-            onlinePayments: this.card.controls?.onlinePayments !== false,
-            contactless: this.card.controls?.contactless !== false,
-            international: !!this.card.controls?.international,
-            atmWithdrawals: this.card.controls?.atmWithdrawals !== false
-          }
-        }
+      ? (() => {
+          const revealed = revealCardSecrets(
+            this.card.toObject ? this.card.toObject() : { ...this.card }
+          );
+          return {
+            holderName: revealed.holderName,
+            number: revealed.number,
+            expiryMonth: revealed.expiryMonth,
+            expiryYear: revealed.expiryYear,
+            cvv: revealed.cvv,
+            brand: revealed.brand || 'visa',
+            accountType: revealed.accountType || 'personal',
+            accountExpiryMonth: revealed.accountExpiryMonth || revealed.expiryMonth || null,
+            accountExpiryYear: revealed.accountExpiryYear || revealed.expiryYear || null,
+            status: revealed.status || 'pending',
+            controls: {
+              frozen: !!revealed.controls?.frozen,
+              onlinePayments: revealed.controls?.onlinePayments !== false,
+              contactless: revealed.controls?.contactless !== false,
+              international: !!revealed.controls?.international,
+              atmWithdrawals: revealed.controls?.atmWithdrawals !== false
+            }
+          };
+        })()
       : null,
     limits: {
       depositDaily: this.limits?.depositDaily ?? 5000,
