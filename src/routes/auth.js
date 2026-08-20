@@ -392,6 +392,53 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
+/**
+ * Public — locked-out users cannot authenticate. Notifies Super Admins via
+ * in-app alerts so they can reset the lock from Customers / Directory.
+ */
+router.post('/request-unlock', async (req, res) => {
+  try {
+    const identifier = String(req.body.identifier || req.body.email || req.body.username || '').trim();
+    const message = String(req.body.message || '').trim().slice(0, 500);
+
+    if (!identifier || identifier.length < 3) {
+      return res.status(400).json({ message: 'Enter the username or email used to sign in' });
+    }
+
+    const user = await findByIdentifier(identifier);
+    // Avoid account enumeration — always return a calm success shape when possible.
+    if (!user) {
+      return res.json({
+        message:
+          'If that account is locked, a Super Admin has been notified. You can also wait for the temporary lock to expire.'
+      });
+    }
+
+    const lockedUntil = user.loginAttempts?.lockedUntil
+      ? new Date(user.loginAttempts.lockedUntil).getTime()
+      : 0;
+    const isLocked = lockedUntil > Date.now() || (user.loginAttempts?.count || 0) >= 5;
+
+    if (isLocked) {
+      const note = message ? ` Note: ${message}` : '';
+      await notifySuperAdmins(
+        'security',
+        'Sign-in unlock requested',
+        `${user.fullName} (@${user.username}) asked to reset a login lock.${note}`,
+        '/admin/customers'
+      );
+    }
+
+    return res.json({
+      message:
+        'Your unlock request was sent to Super Admin. You will be able to sign in again after they reset the lock, or when the temporary pause ends.'
+    });
+  } catch (error) {
+    console.error('Request unlock error:', error);
+    return res.status(500).json({ message: 'Unable to send unlock request' });
+  }
+});
+
 router.post('/reset-password', async (req, res) => {
   try {
     const { resetToken, password, confirmPassword } = req.body;
