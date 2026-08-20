@@ -2,8 +2,8 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
-const { generateAccountNumber } = require('../utils/helpers');
 const auth = require('../middleware/auth');
+const { hydrateUser } = require('../services/user-domain');
 
 const router = express.Router();
 
@@ -296,6 +296,7 @@ router.post('/login', async (req, res) => {
     if (!user) {
       return res.status(401).json({ message: 'Invalid username/email or password' });
     }
+    await hydrateUser(user);
 
     const lockedUntil = user.loginAttempts?.lockedUntil
       ? new Date(user.loginAttempts.lockedUntil).getTime()
@@ -413,6 +414,7 @@ router.post('/request-unlock', async (req, res) => {
           'If that account is locked, a Super Admin has been notified. You can also wait for the temporary lock to expire.'
       });
     }
+    await hydrateUser(user);
 
     const lockedUntil = user.loginAttempts?.lockedUntil
       ? new Date(user.loginAttempts.lockedUntil).getTime()
@@ -491,6 +493,7 @@ router.patch('/profile', auth, async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(user);
 
     if (req.body.fullName != null) {
       const fullName = String(req.body.fullName).trim();

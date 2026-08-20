@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { hydrateUser } = require('../services/user-domain');
 
 async function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
@@ -15,6 +16,7 @@ async function authMiddleware(req, res, next) {
     if (!user) {
       return res.status(401).json({ message: 'Invalid session' });
     }
+    await hydrateUser(user);
     req.user = user;
     next();
   } catch (error) {
