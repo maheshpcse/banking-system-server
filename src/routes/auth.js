@@ -285,14 +285,57 @@ router.post('/login', async (req, res) => {
   try {
     const identifier = req.body.identifier || req.body.email || req.body.username;
     const { password } = req.body;
+    const MAX_ATTEMPTS = 5;
+    const LOCK_MS = 15 * 60 * 1000;
 
     if (!identifier || !password) {
       return res.status(400).json({ message: 'Username/email and password are required' });
     }
 
     const user = await findByIdentifier(identifier);
-    if (!user || !(await user.comparePassword(password))) {
+    if (!user) {
       return res.status(401).json({ message: 'Invalid username/email or password' });
+    }
+
+    const lockedUntil = user.loginAttempts?.lockedUntil
+      ? new Date(user.loginAttempts.lockedUntil).getTime()
+      : 0;
+    if (lockedUntil && lockedUntil > Date.now()) {
+      const mins = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 60000));
+      return res.status(429).json({
+        code: 'LOGIN_LOCKED',
+        message: `Too many failed sign-in attempts. Try again in about ${mins} minute(s), or ask a Super Admin to reset your lock.`
+      });
+    }
+    if (lockedUntil && lockedUntil <= Date.now()) {
+      user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+    }
+
+    if (!(await user.comparePassword(password))) {
+      const nextCount = (user.loginAttempts?.count || 0) + 1;
+      user.loginAttempts = user.loginAttempts || {};
+      user.loginAttempts.count = nextCount;
+      user.loginAttempts.lastFailedAt = new Date();
+      if (nextCount >= MAX_ATTEMPTS) {
+        user.loginAttempts.lockedUntil = new Date(Date.now() + LOCK_MS);
+        await user.save();
+        return res.status(429).json({
+          code: 'LOGIN_LOCKED',
+          message:
+            'You reached the maximum of 5 failed sign-in attempts. Access is paused for 15 minutes, or until a Super Admin resets it.'
+        });
+      }
+      await user.save();
+      const remaining = MAX_ATTEMPTS - nextCount;
+      return res.status(401).json({
+        code: 'LOGIN_FAILED',
+        message: `Invalid username/email or password. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining before a temporary lock.`
+      });
+    }
+
+    if (user.loginAttempts?.count || user.loginAttempts?.lockedUntil) {
+      user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+      await user.save();
     }
 
     const role = user.role || 'customer';

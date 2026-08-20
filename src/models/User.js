@@ -156,6 +156,12 @@ const userSchema = new mongoose.Schema(
       default: 1000,
       min: 0
     },
+    /** Failed password attempts; Super Admin can reset from Customers directory */
+    loginAttempts: {
+      count: { type: Number, default: 0, min: 0 },
+      lockedUntil: { type: Date, default: null },
+      lastFailedAt: { type: Date, default: null }
+    },
     avatar: {
       style: {
         type: String,
@@ -253,6 +259,11 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     staffStatus: this.staffStatus || 'active',
     accountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
     address: this.address || null,
+    loginAttempts: {
+      count: this.loginAttempts?.count || 0,
+      lockedUntil: this.loginAttempts?.lockedUntil || null,
+      remaining: Math.max(0, 5 - (this.loginAttempts?.count || 0))
+    },
     card: this.card
       ? (() => {
           const revealed = revealCardSecrets(
