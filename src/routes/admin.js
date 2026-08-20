@@ -25,12 +25,12 @@ router.get('/customers', async (req, res) => {
     const scope = String(req.query.scope || '').toLowerCase();
     const roleFilter = String(req.query.role || '').toLowerCase();
 
-    // Super Admin can list all roles; managers/admins default to customers only.
+    // Super Admin can list all roles except the Super Admin seed account itself.
     let filter;
     if (req.user?.isSuperAdmin && (scope === 'all' || roleFilter === 'all')) {
-      filter = {};
+      filter = { isSuperAdmin: { $ne: true } };
     } else if (req.user?.isSuperAdmin && ['customer', 'manager', 'admin'].includes(roleFilter)) {
-      filter = { role: roleFilter };
+      filter = { role: roleFilter, isSuperAdmin: { $ne: true } };
     } else {
       filter = {
         $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
@@ -177,6 +177,32 @@ router.patch('/customers/:id/status', async (req, res) => {
   } catch (error) {
     console.error('Admin set status error:', error);
     return res.status(500).json({ message: 'Unable to update status' });
+  }
+});
+
+router.post('/customers/:id/reset-login-attempts', async (req, res) => {
+  try {
+    if (!req.user?.isSuperAdmin) {
+      return res.status(403).json({ message: 'Super Admin access required to reset login locks' });
+    }
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+    await user.save();
+    await Notification.create({
+      user: user._id,
+      kind: 'security',
+      title: 'Sign-in lock cleared',
+      body: 'A Super Admin reset your failed sign-in counter. You can sign in again.',
+      href: '/auth/login',
+      read: false
+    }).catch(() => null);
+    return res.json({ message: 'Login attempts reset', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Reset login attempts error:', error);
+    return res.status(500).json({ message: 'Unable to reset login attempts' });
   }
 });
 
