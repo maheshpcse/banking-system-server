@@ -236,6 +236,16 @@ userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcrypt.compare(candidate, this.password);
 };
 
+/** Dual-write identity embeds into domain collections (accounts, cards, …). */
+userSchema.post('save', async function syncDomainCollections(doc) {
+  try {
+    const { syncUserToDomain } = require('../services/user-domain');
+    await syncUserToDomain(doc);
+  } catch (err) {
+    console.warn('[domain-sync]', err.message);
+  }
+});
+
 userSchema.methods.toSafeJSON = function toSafeJSON() {
   const initials =
     (this.avatar && this.avatar.initials) ||

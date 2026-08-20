@@ -14,6 +14,11 @@ const {
   resolveMoneyChannel
 } = require('../utils/banking-rules');
 const { sealCardSecrets } = require('../utils/card-crypto');
+const {
+  hydrateUser,
+  findUserByAccountNumber,
+  searchAccountsByPrefix
+} = require('../services/user-domain');
 
 const router = express.Router();
 
@@ -38,10 +43,6 @@ function requireActiveAccount(user, channel = 'online') {
   return moneyGate(user, { channel });
 }
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 router.get('/directory', async (req, res) => {
   try {
     const q = String(req.query.q || '')
@@ -51,19 +52,11 @@ router.get('/directory', async (req, res) => {
       return res.json({ items: [] });
     }
 
-    const users = await User.find({
-      _id: { $ne: req.user._id },
-      role: 'customer',
-      accountNumber: { $ne: null, $regex: `^${escapeRegex(q)}` },
-      accountStatus: { $in: ['active', 'approved'] }
-    })
-      .select('fullName accountNumber')
-      .limit(8)
-      .lean();
+    const matches = await searchAccountsByPrefix(q, req.user._id, 8);
 
     return res.json({
-      items: users.map((user) => {
-        const parts = String(user.fullName || '')
+      items: matches.map((row) => {
+        const parts = String(row.fullName || '')
           .split(/\s+/)
           .filter(Boolean);
         const displayName =
@@ -74,7 +67,7 @@ router.get('/directory', async (req, res) => {
                 .map((p) => `${p[0]}.`)
                 .join(' ')}`;
         return {
-          accountNumber: user.accountNumber,
+          accountNumber: row.accountNumber,
           displayName
         };
       })
@@ -170,6 +163,7 @@ router.post('/deposit', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(user);
     const channel = resolveMoneyChannel(req.body.channel, 'online');
     const blocked = requireActiveAccount(user, channel);
     if (blocked) {
@@ -232,6 +226,7 @@ router.post('/withdraw', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(user);
 
     const blocked = moneyGate(user, {
       channel: resolveMoneyChannel(req.body.channel, 'atm')
@@ -304,6 +299,7 @@ router.post('/transfer', async (req, res) => {
     if (!sender) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(sender);
 
     const blocked = requireActiveAccount(
       sender,
@@ -317,7 +313,7 @@ router.post('/transfer', async (req, res) => {
       return res.status(400).json({ message: 'You cannot transfer to your own account' });
     }
 
-    const recipient = await User.findOne({ accountNumber: toAccountNumber });
+    const recipient = await findUserByAccountNumber(toAccountNumber);
     if (!recipient) {
       return res.status(404).json({ message: 'Recipient account not found' });
     }
@@ -413,6 +409,7 @@ router.post('/application', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(user);
     const address = req.body.address || {};
     const card = req.body.card || {};
     if (!address.line1 || !address.city || !address.state || !address.postalCode || !address.country) {
@@ -533,6 +530,10 @@ router.post('/application', async (req, res) => {
 router.patch('/card-controls', async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+    await hydrateUser(user);
     if (!user?.card) {
       return res.status(400).json({ message: 'Add card details before configuring controls' });
     }
@@ -570,6 +571,7 @@ router.post('/limits/request', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
     }
+    await hydrateUser(user);
     if (user.pendingLimitRequest?.status === 'pending') {
       return res.status(400).json({ message: 'A limit change request is already pending manager review' });
     }

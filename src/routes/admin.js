@@ -3,6 +3,13 @@ const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { generateAccountNumber } = require('../utils/helpers');
+const {
+  hydrateUser,
+  hydrateUsers,
+  accountNumberExists,
+  deleteUserDomain,
+  writeAudit
+} = require('../services/user-domain');
 
 const router = express.Router();
 
@@ -43,6 +50,7 @@ router.get('/customers', async (req, res) => {
     const skip = (safePage - 1) * limit;
 
     const users = await User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
+    await hydrateUsers(users);
     return res.json({
       items: users.map((u) => u.toSafeJSON()),
       pagination: {
@@ -64,6 +72,7 @@ router.get('/customers/:id', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Customer not found' });
     }
+    await hydrateUser(user);
     return res.json({ user: user.toSafeJSON() });
   } catch (error) {
     console.error('Admin get customer error:', error);
@@ -127,6 +136,7 @@ router.get('/requests', async (req, res) => {
       };
     }
     const users = await User.find(filter).sort({ updatedAt: -1 }).limit(150);
+    await hydrateUsers(users);
     return res.json({
       items: users.map((u) => {
         const safe = u.toSafeJSON();
@@ -160,9 +170,17 @@ router.patch('/customers/:id/status', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Customer not found' });
     }
+    await hydrateUser(user);
 
     user.accountStatus = status;
     await user.save();
+
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'account.status_update',
+      meta: { status }
+    });
 
     await Notification.create({
       user: user._id,
@@ -189,8 +207,14 @@ router.post('/customers/:id/reset-login-attempts', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
+    await hydrateUser(user);
     user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
     await user.save();
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'login.reset_attempts'
+    });
     await Notification.create({
       user: user._id,
       kind: 'security',
@@ -213,6 +237,13 @@ router.delete('/customers/:id', async (req, res) => {
       return res.status(404).json({ message: 'Customer not found' });
     }
     await Notification.deleteMany({ user: user._id });
+    await deleteUserDomain(user._id);
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'customer.delete',
+      meta: { email: user.email, username: user.username }
+    });
     await user.deleteOne();
     return res.json({ message: 'Customer removed' });
   } catch (error) {
@@ -227,6 +258,7 @@ router.post('/requests/:userId/approve', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Customer not found' });
     }
+    await hydrateUser(user);
     if (user.accountStatus !== 'under_review' && user.accountStatus !== 'address_required') {
       // Allow re-approve path for demo, but require card/address present
       if (!user.address || !user.card) {
@@ -236,9 +268,9 @@ router.post('/requests/:userId/approve', async (req, res) => {
 
     if (!user.accountNumber) {
       let accountNumber = generateAccountNumber();
-      // Ensure unique
+      // Ensure unique across User embeds and Account collection
       // eslint-disable-next-line no-await-in-loop
-      while (await User.findOne({ accountNumber })) {
+      while (await accountNumberExists(accountNumber)) {
         accountNumber = generateAccountNumber();
       }
       user.accountNumber = accountNumber;
@@ -247,8 +279,16 @@ router.post('/requests/:userId/approve', async (req, res) => {
     user.accountStatus = 'active';
     if (user.card) {
       user.card.status = 'active';
+      user.markModified('card');
     }
     await user.save();
+
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'application.approve',
+      meta: { accountNumber: user.accountNumber }
+    });
 
     const masked = `••••${String(user.accountNumber).slice(-4)}`;
     await Notification.create({
@@ -277,9 +317,17 @@ router.post('/requests/:userId/reject', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Customer not found' });
     }
+    await hydrateUser(user);
 
     user.accountStatus = 'rejected';
     await user.save();
+
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'application.reject',
+      meta: { note }
+    });
 
     await Notification.create({
       user: user._id,
@@ -311,6 +359,7 @@ router.get('/staff-pending', requireSuperAdmin, async (_req, res) => {
       isSuperAdmin: { $ne: true },
       staffStatus: 'pending_approval'
     }).sort({ createdAt: -1 });
+    await hydrateUsers(users);
     return res.json({ items: users.map((u) => u.toSafeJSON()) });
   } catch (error) {
     console.error('Staff pending error:', error);
@@ -330,6 +379,7 @@ router.get('/staff', requireSuperAdmin, async (req, res) => {
       filter.staffStatus = status;
     }
     const users = await User.find(filter).sort({ createdAt: -1 }).limit(200);
+    await hydrateUsers(users);
     return res.json({ items: users.map((u) => u.toSafeJSON()) });
   } catch (error) {
     console.error('Staff list error:', error);
@@ -345,6 +395,12 @@ router.post('/staff/:userId/approve', requireSuperAdmin, async (req, res) => {
     }
     user.staffStatus = 'active';
     await user.save();
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'staff.approve',
+      meta: { role: user.role }
+    });
     await Notification.create({
       user: user._id,
       kind: 'admin',
@@ -368,6 +424,12 @@ router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
     }
     user.staffStatus = 'rejected';
     await user.save();
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'staff.reject',
+      meta: { role: user.role }
+    });
     await Notification.create({
       user: user._id,
       kind: 'admin',
@@ -398,6 +460,7 @@ router.get('/limit-requests', requireManagerOrSuperAdmin, async (_req, res) => {
       role: 'customer',
       'pendingLimitRequest.status': 'pending'
     }).sort({ 'pendingLimitRequest.requestedAt': -1 });
+    await hydrateUsers(users);
     return res.json({
       items: users.map((u) => ({
         ...u.toSafeJSON(),
@@ -413,7 +476,11 @@ router.get('/limit-requests', requireManagerOrSuperAdmin, async (_req, res) => {
 router.post('/limit-requests/:userId/approve', requireManagerOrSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
-    if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
+    if (!user) {
+      return res.status(404).json({ message: 'No pending limit request' });
+    }
+    await hydrateUser(user);
+    if (!user.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
       return res.status(404).json({ message: 'No pending limit request' });
     }
     const proposed = user.pendingLimitRequest.proposed || {};
@@ -431,6 +498,12 @@ router.post('/limit-requests/:userId/approve', requireManagerOrSuperAdmin, async
       proposed
     };
     await user.save();
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'limits.approve',
+      meta: { proposed }
+    });
     await Notification.create({
       user: user._id,
       kind: 'account',
@@ -449,7 +522,11 @@ router.post('/limit-requests/:userId/approve', requireManagerOrSuperAdmin, async
 router.post('/limit-requests/:userId/reject', requireManagerOrSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
-    if (!user?.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
+    if (!user) {
+      return res.status(404).json({ message: 'No pending limit request' });
+    }
+    await hydrateUser(user);
+    if (!user.pendingLimitRequest || user.pendingLimitRequest.status !== 'pending') {
       return res.status(404).json({ message: 'No pending limit request' });
     }
     user.pendingLimitRequest = {
@@ -460,6 +537,11 @@ router.post('/limit-requests/:userId/reject', requireManagerOrSuperAdmin, async 
       proposed: user.pendingLimitRequest.proposed
     };
     await user.save();
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'limits.reject'
+    });
     await Notification.create({
       user: user._id,
       kind: 'account',

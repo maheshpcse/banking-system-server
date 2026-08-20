@@ -62,6 +62,15 @@ app.use((err, _req, res, _next) => {
 async function bootstrap() {
   try {
     await connectDB();
+    try {
+      const { migrateAllUsers } = require('./services/user-domain');
+      const result = await migrateAllUsers();
+      console.log(
+        `[domain-migrate] synced ${result.migrated}/${result.total} users into accounts/cards/… collections`
+      );
+    } catch (migrateError) {
+      console.warn('[domain-migrate] skipped:', migrateError.message);
+    }
   } catch (error) {
     console.warn('Database initialization failed; continuing to start the API for health checks.', error.message);
   }

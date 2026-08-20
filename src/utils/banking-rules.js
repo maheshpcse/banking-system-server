@@ -131,6 +131,24 @@ async function assertUniqueCardCombo(User, number, cvv, excludeUserId) {
     return 'Card number and CVV are required';
   }
   const comboHash = hashCardCombo(cleanNumber, cleanCvv);
+
+  // Prefer dedicated Card collection (domain split)
+  try {
+    const Card = require('../models/Card');
+    const cardQuery = {
+      $or: [{ comboHash }, { number: cleanNumber, cvv: cleanCvv }]
+    };
+    if (excludeUserId) {
+      cardQuery.user = { $ne: excludeUserId };
+    }
+    const cardClash = await Card.findOne(cardQuery).select('_id');
+    if (cardClash) {
+      return 'This Card Number + CVV combination is already registered to another customer';
+    }
+  } catch (err) {
+    console.warn('[card-unique]', err.message);
+  }
+
   const query = {
     $or: [
       { 'card.comboHash': comboHash },
