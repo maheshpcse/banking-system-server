@@ -2,6 +2,7 @@ const express = require('express');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const { notifyUser } = require('../services/notify-channels');
 const { generateAccountNumber } = require('../utils/helpers');
 const {
   hydrateUser,
@@ -182,13 +183,12 @@ router.patch('/customers/:id/status', async (req, res) => {
       meta: { status }
     });
 
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'admin',
       title: 'Account status updated',
       body: `Your NovaBank account is now ${status.replace(/_/g, ' ')}.`,
       href: '/settings?tab=banking',
-      read: false
+      forceEmail: true
     });
 
     return res.json({ message: `Status updated to ${status}`, user: user.toSafeJSON() });
@@ -215,13 +215,13 @@ router.post('/customers/:id/reset-login-attempts', async (req, res) => {
       targetUserId: user._id,
       action: 'login.reset_attempts'
     });
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'security',
       title: 'Sign-in lock cleared',
       body: 'A Super Admin reset your failed sign-in counter. You can sign in again.',
       href: '/auth/login',
-      read: false
+      forceEmail: true,
+      forceSms: true
     }).catch(() => null);
     return res.json({ message: 'Login attempts reset', user: user.toSafeJSON() });
   } catch (error) {
@@ -291,13 +291,12 @@ router.post('/requests/:userId/approve', async (req, res) => {
     });
 
     const masked = `••••${String(user.accountNumber).slice(-4)}`;
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'account',
       title: 'Account approved',
       body: `Your account ${masked} is active. Deposit, withdraw, and transfer are unlocked.`,
       href: '/dashboard',
-      read: false
+      forceEmail: true
     });
 
     return res.json({
@@ -329,13 +328,12 @@ router.post('/requests/:userId/reject', async (req, res) => {
       meta: { note }
     });
 
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'account',
       title: 'Application rejected',
       body: note,
       href: '/settings?tab=cardinfo',
-      read: false
+      forceEmail: true
     });
 
     return res.json({ message: 'Application rejected', user: user.toSafeJSON() });
@@ -401,13 +399,12 @@ router.post('/staff/:userId/approve', requireSuperAdmin, async (req, res) => {
       action: 'staff.approve',
       meta: { role: user.role }
     });
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'admin',
       title: 'Staff access approved',
       body: 'Your NovaBank staff portal is active. You can sign in now.',
       href: '/auth/login',
-      read: false
+      forceEmail: true
     });
     return res.json({ message: 'Staff user activated', user: user.toSafeJSON() });
   } catch (error) {
@@ -430,13 +427,12 @@ router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
       action: 'staff.reject',
       meta: { role: user.role }
     });
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'admin',
       title: 'Staff access declined',
       body: 'Your NovaBank staff registration was not approved. Contact your Super Admin for next steps.',
       href: '/auth/staff-status',
-      read: false
+      forceEmail: true
     });
     return res.json({ message: 'Staff registration rejected', user: user.toSafeJSON() });
   } catch (error) {
@@ -504,13 +500,12 @@ router.post('/limit-requests/:userId/approve', requireManagerOrSuperAdmin, async
       action: 'limits.approve',
       meta: { proposed }
     });
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'account',
       title: 'Limit change approved',
       body: 'Your new daily deposit, withdraw, and transfer limits are active.',
       href: '/settings?tab=limits',
-      read: false
+      forceEmail: true
     });
     return res.json({ message: 'Limit request approved', user: user.toSafeJSON() });
   } catch (error) {
@@ -542,13 +537,12 @@ router.post('/limit-requests/:userId/reject', requireManagerOrSuperAdmin, async 
       targetUserId: user._id,
       action: 'limits.reject'
     });
-    await Notification.create({
-      user: user._id,
+    await notifyUser(user._id, {
       kind: 'account',
       title: 'Limit change rejected',
       body: user.pendingLimitRequest.reviewNote,
       href: '/settings?tab=limits',
-      read: false
+      forceEmail: true
     });
     return res.json({ message: 'Limit request rejected', user: user.toSafeJSON() });
   } catch (error) {

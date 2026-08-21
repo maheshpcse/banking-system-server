@@ -189,10 +189,18 @@ const userSchema = new mongoose.Schema(
       image: {
         type: String,
         default: null
+      },
+      /** Role-scoped preset under assets/avatars/{role}/preset-NN.webp */
+      presetId: {
+        type: String,
+        default: null,
+        trim: true,
+        maxlength: 64
       }
     },
     settings: {
       emailAlerts: { type: Boolean, default: true },
+      smsAlerts: { type: Boolean, default: false },
       hideBalance: { type: Boolean, default: false },
       compactLedger: { type: Boolean, default: false },
       marketingTips: { type: Boolean, default: false },
@@ -334,10 +342,12 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     avatar: {
       style: (this.avatar && this.avatar.style) || 'mint',
       initials: initials || 'NB',
-      image: (this.avatar && this.avatar.image) || null
+      image: (this.avatar && this.avatar.image) || null,
+      presetId: (this.avatar && this.avatar.presetId) || null
     },
     settings: {
       emailAlerts: this.settings?.emailAlerts !== false,
+      smsAlerts: !!this.settings?.smsAlerts,
       hideBalance: !!this.settings?.hideBalance,
       compactLedger: !!this.settings?.compactLedger,
       marketingTips: !!this.settings?.marketingTips,
