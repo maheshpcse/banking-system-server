@@ -44,6 +44,20 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true
     },
+    /** E.164-style dial code, e.g. +1 — not used for Super Admin */
+    countryCode: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 8
+    },
+    /** National phone digits (no spaces) — not used for Super Admin */
+    phone: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 20
+    },
     password: {
       type: String,
       required: true,
@@ -262,6 +276,8 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     fullName: this.fullName,
     username: this.username,
     email: this.email,
+    countryCode: this.countryCode || '',
+    phone: this.phone || '',
     accountNumber: this.accountNumber || null,
     balance: this.balance,
     role: this.role || 'customer',

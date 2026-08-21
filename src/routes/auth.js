@@ -526,6 +526,23 @@ router.patch('/profile', auth, async (req, res) => {
       user.email = cleanEmail;
     }
 
+    if (!user.isSuperAdmin && (req.body.countryCode != null || req.body.phone != null)) {
+      if (req.body.countryCode != null) {
+        const countryCode = String(req.body.countryCode).trim();
+        if (countryCode && !/^\+[1-9][0-9]{0,7}$/.test(countryCode)) {
+          return res.status(400).json({ message: 'Country code must look like +1 or +44' });
+        }
+        user.countryCode = countryCode;
+      }
+      if (req.body.phone != null) {
+        const phone = String(req.body.phone).replace(/[\s()-]/g, '').trim();
+        if (phone && !/^[0-9]{7,15}$/.test(phone)) {
+          return res.status(400).json({ message: 'Phone number must be 7–15 digits' });
+        }
+        user.phone = phone;
+      }
+    }
+
     if (req.body.avatar) {
       const allowed = ['mint', 'sky', 'sand', 'rose', 'slate'];
       if (req.body.avatar.style && allowed.includes(req.body.avatar.style)) {
@@ -585,12 +602,16 @@ router.patch('/profile', auth, async (req, res) => {
       req.body.fullName == null &&
       req.body.username == null &&
       req.body.email == null &&
+      req.body.countryCode == null &&
+      req.body.phone == null &&
       !req.body.avatar;
     const onlyAvatar =
       !!req.body.avatar &&
       req.body.fullName == null &&
       req.body.username == null &&
       req.body.email == null &&
+      req.body.countryCode == null &&
+      req.body.phone == null &&
       !req.body.settings;
     if (onlySettings) {
       message = 'Preferences saved.';
