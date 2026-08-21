@@ -2,7 +2,7 @@ const express = require('express');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
-const Notification = require('../models/Notification');
+const { notifyUser, notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
 const { generateReference, roundMoney } = require('../utils/helpers');
 const {
   moneyGate,
@@ -24,16 +24,9 @@ const router = express.Router();
 
 router.use(auth);
 
-async function notify(userId, kind, title, body, href) {
+async function notify(userId, kind, title, body, href, channelOpts = {}) {
   try {
-    await Notification.create({
-      user: userId,
-      kind,
-      title,
-      body,
-      href: href || null,
-      read: false
-    });
+    await notifyUser(userId, { kind, title, body, href, ...channelOpts });
   } catch (error) {
     console.warn('Notification create failed:', error.message);
   }
@@ -487,23 +480,17 @@ router.post('/application', async (req, res) => {
         '/settings?tab=banking'
       );
       try {
-        const reviewers = await User.find({
-          $or: [
-            { role: 'manager', staffStatus: 'active' },
-            { isSuperAdmin: true, staffStatus: 'active' }
-          ]
-        }).select('_id isSuperAdmin');
-        await Promise.all(
-          reviewers.map((staff) =>
-            Notification.create({
-              user: staff._id,
-              kind: 'account',
-              title: 'New account opening request',
-              body: `${user.fullName} submitted an account & card application for review.`,
-              href: staff.isSuperAdmin ? '/admin/requests' : '/manager/approvals',
-              read: false
-            }).catch(() => null)
-          )
+        await notifyManagers(
+          'account',
+          'New account opening request',
+          `${user.fullName} submitted an account & card application for review.`,
+          '/manager/approvals'
+        );
+        await notifySuperAdmins(
+          'account',
+          'New account opening request',
+          `${user.fullName} submitted an account & card application for review.`,
+          '/admin/requests'
         );
       } catch (error) {
         console.warn('Staff application notify failed:', error.message);
@@ -609,20 +596,17 @@ router.post('/limits/request', async (req, res) => {
       '/settings?tab=limits'
     );
     try {
-      const managers = await User.find({
-        $or: [{ role: 'manager', staffStatus: 'active' }, { isSuperAdmin: true, staffStatus: 'active' }]
-      }).select('_id isSuperAdmin');
-      await Promise.all(
-        managers.map((staff) =>
-          Notification.create({
-            user: staff._id,
-            kind: 'account',
-            title: 'Limit change request',
-            body: `${user.fullName} requested new 24-hour deposit / withdraw / transfer limits.`,
-            href: staff.isSuperAdmin ? '/manager/limits' : '/manager/limits',
-            read: false
-          }).catch(() => null)
-        )
+      await notifyManagers(
+        'account',
+        'Limit change request',
+        `${user.fullName} requested new 24-hour deposit / withdraw / transfer limits.`,
+        '/manager/limits'
+      );
+      await notifySuperAdmins(
+        'account',
+        'Limit change request',
+        `${user.fullName} requested new 24-hour deposit / withdraw / transfer limits.`,
+        '/manager/limits'
       );
     } catch (error) {
       console.warn('Limit request staff notify failed:', error.message);

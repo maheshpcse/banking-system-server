@@ -1,9 +1,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const Notification = require('../models/Notification');
 const auth = require('../middleware/auth');
 const { hydrateUser } = require('../services/user-domain');
+const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
 
 const router = express.Router();
 
@@ -11,50 +11,7 @@ const THEMES = User.THEMES || ['daylight', 'midnight', 'sand', 'ocean', 'graphit
 const FONTS = User.FONTS || ['comfortable', 'compact', 'large', 'editorial', 'technical'];
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AED', 'JPY', 'CAD', 'AUD'];
 const COLOR_MODES = ['light', 'dark'];
-
-async function notifySuperAdmins(kind, title, body, href) {
-  try {
-    const supers = await User.find({ isSuperAdmin: true, staffStatus: 'active' }).select('_id');
-    await Promise.all(
-      supers.map((admin) =>
-        Notification.create({
-          user: admin._id,
-          kind,
-          title,
-          body,
-          href: href || '/admin/staff',
-          read: false
-        })
-      )
-    );
-  } catch (error) {
-    console.warn('Super Admin notify failed:', error.message);
-  }
-}
-
-async function notifyManagers(kind, title, body, href) {
-  try {
-    const managers = await User.find({
-      role: 'manager',
-      staffStatus: 'active',
-      isSuperAdmin: { $ne: true }
-    }).select('_id');
-    await Promise.all(
-      managers.map((mgr) =>
-        Notification.create({
-          user: mgr._id,
-          kind,
-          title,
-          body,
-          href: href || '/manager/approvals',
-          read: false
-        })
-      )
-    );
-  } catch (error) {
-    console.warn('Manager notify failed:', error.message);
-  }
-}
+const AVATAR_PRESET_RE = /^(customer|manager|admin)\/preset-[0-9]{2}$/;
 
 function signToken(user) {
   return jwt.sign(
@@ -560,15 +517,28 @@ router.patch('/profile', auth, async (req, res) => {
           user.avatar.image = null;
         } else if (typeof image === 'string' && image.startsWith('data:image/') && image.length < 1_200_000) {
           user.avatar.image = image;
+          user.avatar.presetId = null;
         } else {
           return res.status(400).json({ message: 'Profile image must be a small image data URL' });
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body.avatar, 'presetId')) {
+        user.avatar = user.avatar || {};
+        const presetId = req.body.avatar.presetId;
+        if (presetId == null || presetId === '') {
+          user.avatar.presetId = null;
+        } else if (typeof presetId === 'string' && AVATAR_PRESET_RE.test(presetId)) {
+          user.avatar.presetId = presetId;
+          user.avatar.image = null;
+        } else {
+          return res.status(400).json({ message: 'Invalid avatar preset' });
         }
       }
     }
 
     if (req.body.settings) {
       user.settings = user.settings || {};
-      ['emailAlerts', 'hideBalance', 'compactLedger', 'marketingTips'].forEach((key) => {
+      ['emailAlerts', 'smsAlerts', 'hideBalance', 'compactLedger', 'marketingTips'].forEach((key) => {
         if (typeof req.body.settings[key] === 'boolean') {
           user.settings[key] = req.body.settings[key];
         }

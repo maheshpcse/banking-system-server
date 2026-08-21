@@ -1,6 +1,7 @@
 const express = require('express');
 const auth = require('../middleware/auth');
 const Notification = require('../models/Notification');
+const { createInApp, notifyUser } = require('../services/notify-channels');
 
 const router = express.Router();
 
@@ -19,16 +20,8 @@ function toItem(doc) {
 }
 
 /** Create a notification for the authenticated user (or server helpers). */
-async function createNotification({ userId, kind, title, body, href }) {
-  const doc = await Notification.create({
-    user: userId,
-    kind: kind || 'system',
-    title,
-    body,
-    href: href || null,
-    read: false
-  });
-  return doc;
+async function createNotification({ userId, kind, title, body, href, forceEmail, forceSms }) {
+  return notifyUser(userId, { kind, title, body, href, forceEmail, forceSms });
 }
 
 router.get('/', async (req, res) => {
