@@ -8,6 +8,7 @@
     "dev": "nodemon --exec \"bash start.sh\"",
     "start:raw": "node src/index.js",
     "seed:admin": "node src/config/scripts/seed-admin.js",
+    "seed:billing": "node src/config/scripts/seed-billing.js",
     "migrate:domain": "node scripts/migrate-domain.js"
   },
   "keywords": ["banking", "mean", "express", "mongodb"],

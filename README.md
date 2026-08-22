@@ -11,6 +11,7 @@ Frontend UI: [`maheshpcse/banking-system`](https://github.com/maheshpcse/banking
 - Deposit / withdraw
 - Peer transfers
 - Paginated transaction history
+- **Billing APIs** (`/api/billing`) — products, customers, bills, payments, complaints
 - In-memory MongoDB replica set for local demo (or real `MONGODB_URI`)
 
 ## Requirements
@@ -85,3 +86,4 @@ docker run --rm -p 3000:3000 \
 | `npm run dev` | Nodemon + `start.sh` |
 | `npm run start:raw` | `node src/index.js` without OpenSSL helper |
 | `npm run seed:admin` | Seed Super Admin (`src/config/scripts/seed-admin.js`; wrapper also at `scripts/seed-admin.js`) |
+| `npm run seed:billing` | Seed sample billing catalog (or use `POST /api/billing/seed`) |

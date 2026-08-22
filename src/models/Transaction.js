@@ -40,6 +40,13 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true
+    },
+    /** Optional bridge to NovaBank Billing invoices */
+    billingReference: {
+      type: String,
+      default: null,
+      index: true,
+      sparse: true
     }
   },
   { timestamps: true }
