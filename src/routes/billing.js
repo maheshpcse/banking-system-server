@@ -1,0 +1,604 @@
+const express = require('express');
+const crypto = require('crypto');
+const auth = require('../middleware/auth');
+const BillingProduct = require('../models/BillingProduct');
+const BillingCustomer = require('../models/BillingCustomer');
+const Bill = require('../models/Bill');
+const Payment = require('../models/Payment');
+const BillingComplaint = require('../models/BillingComplaint');
+const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
+
+const router = express.Router();
+router.use(auth);
+
+function requireBillingStaff(req, res, next) {
+  if (req.user?.role === 'manager' || req.user?.role === 'admin' || req.user?.isSuperAdmin) {
+    return next();
+  }
+  return res.status(403).json({ message: 'Billing desk access requires manager or admin' });
+}
+
+router.use(requireBillingStaff);
+
+function money(n) {
+  return Math.round(Number(n || 0) * 100) / 100;
+}
+
+function nextBillNumber() {
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = crypto.randomBytes(2).toString('hex').toUpperCase();
+  return `NB-INV-${stamp}-${rand}`;
+}
+
+function paymentRef(method) {
+  return `PAY-${String(method || 'X').toUpperCase()}-${Date.now().toString(36).toUpperCase()}-${crypto
+    .randomBytes(2)
+    .toString('hex')
+    .toUpperCase()}`;
+}
+
+/* ---------- Dashboard ---------- */
+
+router.get('/dashboard/stats', async (_req, res) => {
+  try {
+    const [productCount, customerCount, billCount, paidBills, openComplaints, recentBills] =
+      await Promise.all([
+        BillingProduct.countDocuments({ active: true }),
+        BillingCustomer.countDocuments(),
+        Bill.countDocuments(),
+        Bill.find({ paymentStatus: 'paid' }).select('grandTotal'),
+        BillingComplaint.countDocuments({ status: { $in: ['open', 'escalated'] } }),
+        Bill.find().sort({ createdAt: -1 }).limit(6)
+      ]);
+
+    const totalSales = money(paidBills.reduce((sum, b) => sum + (b.grandTotal || 0), 0));
+
+    return res.json({
+      totalSales,
+      totalOrders: billCount,
+      totalProducts: productCount,
+      totalCustomers: customerCount,
+      openComplaints,
+      recentBills: recentBills.map((b) => b.toSafeJSON())
+    });
+  } catch (error) {
+    console.error('Billing stats error:', error);
+    return res.status(500).json({ message: 'Unable to load billing stats' });
+  }
+});
+
+/* ---------- Products ---------- */
+
+router.get('/products', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const filter = {};
+    if (q) {
+      filter.$or = [
+        { name: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { sku: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+      ];
+    }
+    const items = await BillingProduct.find(filter).sort({ name: 1 });
+    return res.json({ items: items.map((p) => p.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing products list error:', error);
+    return res.status(500).json({ message: 'Unable to load products' });
+  }
+});
+
+router.post('/products', async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const price = Number(req.body?.price);
+    const stock = Number(req.body?.stock);
+    const gstPercentage = Number(req.body?.gstPercentage ?? 18);
+    if (!name || Number.isNaN(price) || price < 0 || Number.isNaN(stock) || stock < 0) {
+      return res.status(400).json({ message: 'Valid name, price, and stock are required' });
+    }
+    const product = await BillingProduct.create({
+      name,
+      sku: String(req.body?.sku || '').trim(),
+      price: money(price),
+      stock: Math.floor(stock),
+      gstPercentage: Number.isNaN(gstPercentage) ? 18 : gstPercentage,
+      active: req.body?.active !== false,
+      createdBy: req.user._id
+    });
+    return res.status(201).json({ message: 'Product created', product: product.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing product create error:', error);
+    return res.status(500).json({ message: 'Unable to create product' });
+  }
+});
+
+router.put('/products/:id', async (req, res) => {
+  try {
+    const product = await BillingProduct.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    if (req.body?.name != null) product.name = String(req.body.name).trim();
+    if (req.body?.sku != null) product.sku = String(req.body.sku).trim();
+    if (req.body?.price != null) product.price = money(req.body.price);
+    if (req.body?.stock != null) product.stock = Math.floor(Number(req.body.stock));
+    if (req.body?.gstPercentage != null) product.gstPercentage = Number(req.body.gstPercentage);
+    if (req.body?.active != null) product.active = !!req.body.active;
+    await product.save();
+    return res.json({ message: 'Product updated', product: product.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing product update error:', error);
+    return res.status(500).json({ message: 'Unable to update product' });
+  }
+});
+
+router.delete('/products/:id', async (req, res) => {
+  try {
+    const product = await BillingProduct.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    product.active = false;
+    product.stock = 0;
+    await product.save();
+    return res.json({ message: 'Product archived', product: product.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing product delete error:', error);
+    return res.status(500).json({ message: 'Unable to archive product' });
+  }
+});
+
+/* ---------- Customers ---------- */
+
+router.get('/customers', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const filter = {};
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { name: new RegExp(safe, 'i') },
+        { email: new RegExp(safe, 'i') },
+        { phone: new RegExp(safe, 'i') },
+        { bankingAccountNumber: new RegExp(safe, 'i') }
+      ];
+    }
+    const items = await BillingCustomer.find(filter).sort({ name: 1 });
+    return res.json({ items: items.map((c) => c.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing customers list error:', error);
+    return res.status(500).json({ message: 'Unable to load customers' });
+  }
+});
+
+router.post('/customers', async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ message: 'Customer name is required' });
+    }
+    const customer = await BillingCustomer.create({
+      name,
+      email: String(req.body?.email || '').trim().toLowerCase(),
+      phone: String(req.body?.phone || '').trim(),
+      address: String(req.body?.address || '').trim(),
+      bankingAccountNumber: String(req.body?.bankingAccountNumber || '').trim() || null,
+      createdBy: req.user._id
+    });
+    return res.status(201).json({ message: 'Customer created', customer: customer.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing customer create error:', error);
+    return res.status(500).json({ message: 'Unable to create customer' });
+  }
+});
+
+router.put('/customers/:id', async (req, res) => {
+  try {
+    const customer = await BillingCustomer.findById(req.params.id);
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    if (req.body?.name != null) customer.name = String(req.body.name).trim();
+    if (req.body?.email != null) customer.email = String(req.body.email).trim().toLowerCase();
+    if (req.body?.phone != null) customer.phone = String(req.body.phone).trim();
+    if (req.body?.address != null) customer.address = String(req.body.address).trim();
+    if (req.body?.bankingAccountNumber !== undefined) {
+      customer.bankingAccountNumber = String(req.body.bankingAccountNumber || '').trim() || null;
+    }
+    await customer.save();
+    return res.json({ message: 'Customer updated', customer: customer.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing customer update error:', error);
+    return res.status(500).json({ message: 'Unable to update customer' });
+  }
+});
+
+router.delete('/customers/:id', async (req, res) => {
+  try {
+    const customer = await BillingCustomer.findByIdAndDelete(req.params.id);
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    return res.json({ message: 'Customer removed' });
+  } catch (error) {
+    console.error('Billing customer delete error:', error);
+    return res.status(500).json({ message: 'Unable to remove customer' });
+  }
+});
+
+/* ---------- Bills ---------- */
+
+router.get('/bills', async (req, res) => {
+  try {
+    const filter = {};
+    const billId = String(req.query.billId || req.query.q || '').trim();
+    const customerId = String(req.query.customerId || '').trim();
+    const from = String(req.query.from || '').trim();
+    const to = String(req.query.to || '').trim();
+
+    if (billId) {
+      filter.$or = [
+        { billNumber: new RegExp(billId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { customerName: new RegExp(billId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+      ];
+    }
+    if (customerId) filter.customer = customerId;
+    if (from || to) {
+      filter.createdAt = {};
+      if (from) filter.createdAt.$gte = new Date(from);
+      if (to) {
+        const end = new Date(to);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(5, Number(req.query.limit) || 12));
+    const skip = (page - 1) * limit;
+    const [total, items] = await Promise.all([
+      Bill.countDocuments(filter),
+      Bill.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)
+    ]);
+
+    return res.json({
+      items: items.map((b) => b.toSafeJSON()),
+      page,
+      limit,
+      total,
+      pages: Math.max(1, Math.ceil(total / limit))
+    });
+  } catch (error) {
+    console.error('Billing bills list error:', error);
+    return res.status(500).json({ message: 'Unable to load bills' });
+  }
+});
+
+router.get('/bills/:id', async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    const payments = await Payment.find({ bill: bill._id }).sort({ createdAt: -1 });
+    return res.json({
+      bill: bill.toSafeJSON(),
+      payments: payments.map((p) => p.toSafeJSON())
+    });
+  } catch (error) {
+    console.error('Billing bill detail error:', error);
+    return res.status(500).json({ message: 'Unable to load bill' });
+  }
+});
+
+router.post('/bills', async (req, res) => {
+  try {
+    const customerId = String(req.body?.customerId || '').trim();
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const discount = money(req.body?.discount || 0);
+    if (!customerId || !rawItems.length) {
+      return res.status(400).json({ message: 'Customer and at least one line item are required' });
+    }
+
+    const customer = await BillingCustomer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    const items = [];
+    let subtotal = 0;
+    let tax = 0;
+
+    for (const row of rawItems) {
+      const product = await BillingProduct.findById(row.productId);
+      if (!product || !product.active) {
+        return res.status(400).json({ message: `Product unavailable: ${row.productId}` });
+      }
+      const quantity = Math.max(1, Math.floor(Number(row.quantity) || 1));
+      if (product.stock < quantity) {
+        return res.status(400).json({ message: `Insufficient stock for ${product.name}` });
+      }
+      const unitPrice = money(product.price);
+      const gstPercentage = Number(product.gstPercentage) || 0;
+      const lineNet = money(unitPrice * quantity);
+      const lineTax = money((lineNet * gstPercentage) / 100);
+      subtotal = money(subtotal + lineNet);
+      tax = money(tax + lineTax);
+      items.push({
+        product: product._id,
+        name: product.name,
+        quantity,
+        unitPrice,
+        gstPercentage,
+        lineTotal: money(lineNet + lineTax)
+      });
+      product.stock -= quantity;
+      await product.save();
+    }
+
+    const safeDiscount = Math.min(discount, subtotal);
+    const taxableBase = money(subtotal - safeDiscount);
+    // Re-scale tax proportionally after discount on net.
+    const scale = subtotal > 0 ? taxableBase / subtotal : 0;
+    const finalTax = money(tax * scale);
+    const grandTotal = money(taxableBase + finalTax);
+
+    const bill = await Bill.create({
+      billNumber: nextBillNumber(),
+      customer: customer._id,
+      customerName: customer.name,
+      bankingAccountNumber: customer.bankingAccountNumber || null,
+      items,
+      subtotal,
+      discount: safeDiscount,
+      tax: finalTax,
+      grandTotal,
+      paymentStatus: 'pending',
+      notes: String(req.body?.notes || '').trim(),
+      createdBy: req.user._id
+    });
+
+    return res.status(201).json({ message: 'Bill created', bill: bill.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing bill create error:', error);
+    return res.status(500).json({ message: 'Unable to create bill' });
+  }
+});
+
+/* ---------- Payments (fake gateway) ---------- */
+
+router.get('/payments', async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.billId) filter.bill = req.query.billId;
+    const items = await Payment.find(filter).sort({ createdAt: -1 }).limit(100);
+    return res.json({ items: items.map((p) => p.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing payments list error:', error);
+    return res.status(500).json({ message: 'Unable to load payments' });
+  }
+});
+
+router.post('/payments', async (req, res) => {
+  try {
+    const billId = String(req.body?.billId || '').trim();
+    const paymentMethod = String(req.body?.paymentMethod || '').trim().toLowerCase();
+    const simulateFail = !!req.body?.simulateFail;
+
+    if (!billId || !['cash', 'card', 'upi', 'qr'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'billId and a valid paymentMethod are required' });
+    }
+
+    const bill = await Bill.findById(billId);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    if (bill.paymentStatus === 'paid') {
+      return res.status(400).json({ message: 'Bill is already paid' });
+    }
+
+    const status = simulateFail ? 'failed' : 'success';
+    const payment = await Payment.create({
+      bill: bill._id,
+      billNumber: bill.billNumber,
+      paymentMethod,
+      status,
+      amount: bill.grandTotal,
+      transactionRef: paymentRef(paymentMethod),
+      meta: {
+        gateway: 'novabank-fake-pos',
+        qrToken: paymentMethod === 'qr' ? crypto.randomBytes(8).toString('hex') : undefined
+      },
+      createdBy: req.user._id
+    });
+
+    bill.paymentStatus = status === 'success' ? 'paid' : 'failed';
+    bill.paymentMethod = paymentMethod;
+    await bill.save();
+
+    if (status === 'success') {
+      await notifyManagers(
+        'billing',
+        'Invoice paid',
+        `${bill.billNumber} settled via ${paymentMethod.toUpperCase()} · $${bill.grandTotal.toFixed(2)}`,
+        '/manager/billing'
+      );
+    }
+
+    return res.status(201).json({
+      message: status === 'success' ? 'Payment successful' : 'Payment failed (simulated)',
+      payment: payment.toSafeJSON(),
+      bill: bill.toSafeJSON()
+    });
+  } catch (error) {
+    console.error('Billing payment error:', error);
+    return res.status(500).json({ message: 'Unable to process payment' });
+  }
+});
+
+router.get('/complaints', async (req, res) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const filter = {};
+    if (status) filter.status = status;
+    const items = await BillingComplaint.find(filter).sort({ createdAt: -1 }).limit(100);
+    return res.json({ items: items.map((c) => c.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing complaints list error:', error);
+    return res.status(500).json({ message: 'Unable to load complaints' });
+  }
+});
+
+router.post('/complaints', async (req, res) => {
+  try {
+    const subject = String(req.body?.subject || '').trim();
+    const detail = String(req.body?.detail || '').trim();
+    const customerName = String(req.body?.customerName || '').trim();
+    if (!subject || !detail || !customerName) {
+      return res.status(400).json({ message: 'customerName, subject, and detail are required' });
+    }
+
+    let bill = null;
+    if (req.body?.billId) {
+      bill = await Bill.findById(req.body.billId);
+    }
+
+    const complaint = await BillingComplaint.create({
+      bill: bill?._id || null,
+      billNumber: bill?.billNumber || String(req.body?.billNumber || '').trim(),
+      customer: bill?.customer || req.body?.customerId || null,
+      customerName: customerName || bill?.customerName,
+      bankingAccountNumber: bill?.bankingAccountNumber || req.body?.bankingAccountNumber || null,
+      subject,
+      detail,
+      status: 'open',
+      createdBy: req.user._id
+    });
+
+    await notifyManagers(
+      'complaint',
+      'Billing complaint opened',
+      `${complaint.customerName}: ${complaint.subject}`,
+      '/manager/billing'
+    );
+    await notifySuperAdmins(
+      'complaint',
+      'Billing complaint opened',
+      `${complaint.customerName}: ${complaint.subject}`,
+      '/manager/billing'
+    );
+
+    return res.status(201).json({ message: 'Complaint filed', complaint: complaint.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing complaint create error:', error);
+    return res.status(500).json({ message: 'Unable to file complaint' });
+  }
+});
+
+router.patch('/complaints/:id', async (req, res) => {
+  try {
+    const complaint = await BillingComplaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: 'Complaint not found' });
+    }
+
+    const action = String(req.body?.action || req.body?.status || '').trim().toLowerCase();
+    const note = String(req.body?.resolutionNote || '').trim();
+    const allowed = ['accepted', 'adjusted', 'rejected', 'escalated', 'resolved'];
+    if (!allowed.includes(action)) {
+      return res.status(400).json({
+        message: 'action must be accepted, adjusted, rejected, escalated, or resolved'
+      });
+    }
+
+    if (action === 'escalated' && !(req.user.role === 'admin' || req.user.isSuperAdmin)) {
+      // Managers may escalate; Super Admins handle.
+    }
+
+    complaint.status = action;
+    if (note) complaint.resolutionNote = note;
+    complaint.handledBy = req.user._id;
+    await complaint.save();
+
+    if (action === 'escalated') {
+      await notifySuperAdmins(
+        'complaint',
+        'Billing complaint escalated',
+        `${complaint.customerName}: ${complaint.subject}`,
+        '/manager/billing'
+      );
+    } else {
+      await notifyManagers(
+        'complaint',
+        `Complaint ${action}`,
+        `${complaint.customerName}: ${complaint.subject}`,
+        '/manager/billing'
+      );
+    }
+
+    return res.json({ message: `Complaint ${action}`, complaint: complaint.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing complaint update error:', error);
+    return res.status(500).json({ message: 'Unable to update complaint' });
+  }
+});
+
+/* ---------- Seed sample catalog ---------- */
+
+router.post('/seed', async (req, res) => {
+  try {
+    const force = !!req.body?.force;
+    const productCount = await BillingProduct.countDocuments();
+    const customerCount = await BillingCustomer.countDocuments();
+    if (!force && productCount > 0 && customerCount > 0) {
+      return res.json({
+        message: 'Catalog already seeded',
+        products: productCount,
+        customers: customerCount
+      });
+    }
+
+    const products = await BillingProduct.insertMany([
+      { name: 'Premium Vault Ledger Kit', sku: 'NV-LED-01', price: 49.0, stock: 40, gstPercentage: 18 },
+      { name: 'NovaDesk POS Scanner', sku: 'NV-POS-02', price: 129.5, stock: 18, gstPercentage: 18 },
+      { name: 'Secure Card Sleeve Pack', sku: 'NV-CRD-03', price: 14.99, stock: 120, gstPercentage: 5 },
+      { name: 'Business Statement Bundle', sku: 'NV-STM-04', price: 29.0, stock: 60, gstPercentage: 12 },
+      { name: 'Treasury Insight Report', sku: 'NV-RPT-05', price: 79.0, stock: 25, gstPercentage: 18 }
+    ]);
+
+    const customers = await BillingCustomer.insertMany([
+      {
+        name: 'Aurora Trading Co.',
+        email: 'accounts@aurora.example',
+        phone: '5551002000',
+        address: '120 Market Street',
+        bankingAccountNumber: null
+      },
+      {
+        name: 'Cedar Retail Group',
+        email: 'billing@cedar.example',
+        phone: '5551003000',
+        address: '88 Harbor Lane',
+        bankingAccountNumber: null
+      },
+      {
+        name: 'Summit Advisory LLC',
+        email: 'finance@summit.example',
+        phone: '5551004000',
+        address: '14 Ridge Avenue',
+        bankingAccountNumber: null
+      }
+    ]);
+
+    return res.status(201).json({
+      message: 'Billing sample data ready',
+      products: products.length,
+      customers: customers.length
+    });
+  } catch (error) {
+    console.error('Billing seed error:', error);
+    return res.status(500).json({ message: 'Unable to seed billing data' });
+  }
+});
+
+module.exports = router;
