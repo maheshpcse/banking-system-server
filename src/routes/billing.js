@@ -6,19 +6,37 @@ const BillingCustomer = require('../models/BillingCustomer');
 const Bill = require('../models/Bill');
 const Payment = require('../models/Payment');
 const BillingComplaint = require('../models/BillingComplaint');
+const BillingSettings = require('../models/BillingSettings');
 const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
 
 const router = express.Router();
 router.use(auth);
 
-function requireBillingStaff(req, res, next) {
+/** Super Admin monitors in Banking only — not a Billing POS operator. */
+function isBillingOperator(user) {
+  if (!user || user.isSuperAdmin) {
+    return false;
+  }
+  return user.role === 'manager' || user.role === 'admin';
+}
+
+function requireBillingViewer(req, res, next) {
   if (req.user?.role === 'manager' || req.user?.role === 'admin' || req.user?.isSuperAdmin) {
     return next();
   }
-  return res.status(403).json({ message: 'Billing desk access requires manager or admin' });
+  return res.status(403).json({ message: 'Billing access requires staff credentials' });
 }
 
-router.use(requireBillingStaff);
+function requireBillingOperator(req, res, next) {
+  if (isBillingOperator(req.user)) {
+    return next();
+  }
+  return res.status(403).json({
+    message: 'Only Manager or Admin operators can change Billing catalog, invoices, and payments'
+  });
+}
+
+router.use(requireBillingViewer);
 
 function money(n) {
   return Math.round(Number(n || 0) * 100) / 100;
@@ -87,7 +105,7 @@ router.get('/products', async (req, res) => {
   }
 });
 
-router.post('/products', async (req, res) => {
+router.post('/products', requireBillingOperator, async (req, res) => {
   try {
     const name = String(req.body?.name || '').trim();
     const price = Number(req.body?.price);
@@ -112,7 +130,7 @@ router.post('/products', async (req, res) => {
   }
 });
 
-router.put('/products/:id', async (req, res) => {
+router.put('/products/:id', requireBillingOperator, async (req, res) => {
   try {
     const product = await BillingProduct.findById(req.params.id);
     if (!product) {
@@ -132,7 +150,7 @@ router.put('/products/:id', async (req, res) => {
   }
 });
 
-router.delete('/products/:id', async (req, res) => {
+router.delete('/products/:id', requireBillingOperator, async (req, res) => {
   try {
     const product = await BillingProduct.findById(req.params.id);
     if (!product) {
@@ -171,7 +189,7 @@ router.get('/customers', async (req, res) => {
   }
 });
 
-router.post('/customers', async (req, res) => {
+router.post('/customers', requireBillingOperator, async (req, res) => {
   try {
     const name = String(req.body?.name || '').trim();
     if (!name) {
@@ -192,7 +210,7 @@ router.post('/customers', async (req, res) => {
   }
 });
 
-router.put('/customers/:id', async (req, res) => {
+router.put('/customers/:id', requireBillingOperator, async (req, res) => {
   try {
     const customer = await BillingCustomer.findById(req.params.id);
     if (!customer) {
@@ -213,7 +231,7 @@ router.put('/customers/:id', async (req, res) => {
   }
 });
 
-router.delete('/customers/:id', async (req, res) => {
+router.delete('/customers/:id', requireBillingOperator, async (req, res) => {
   try {
     const customer = await BillingCustomer.findByIdAndDelete(req.params.id);
     if (!customer) {
@@ -291,7 +309,7 @@ router.get('/bills/:id', async (req, res) => {
   }
 });
 
-router.post('/bills', async (req, res) => {
+router.post('/bills', requireBillingOperator, async (req, res) => {
   try {
     const customerId = String(req.body?.customerId || '').trim();
     const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
@@ -379,7 +397,7 @@ router.get('/payments', async (req, res) => {
   }
 });
 
-router.post('/payments', async (req, res) => {
+router.post('/payments', requireBillingOperator, async (req, res) => {
   try {
     const billId = String(req.body?.billId || '').trim();
     const paymentMethod = String(req.body?.paymentMethod || '').trim().toLowerCase();
@@ -449,7 +467,7 @@ router.get('/complaints', async (req, res) => {
   }
 });
 
-router.post('/complaints', async (req, res) => {
+router.post('/complaints', requireBillingOperator, async (req, res) => {
   try {
     const subject = String(req.body?.subject || '').trim();
     const detail = String(req.body?.detail || '').trim();
@@ -545,7 +563,7 @@ router.patch('/complaints/:id', async (req, res) => {
 
 /* ---------- Seed sample catalog ---------- */
 
-router.post('/seed', async (req, res) => {
+router.post('/seed', requireBillingOperator, async (req, res) => {
   try {
     const force = !!req.body?.force;
     const productCount = await BillingProduct.countDocuments();
@@ -598,6 +616,50 @@ router.post('/seed', async (req, res) => {
   } catch (error) {
     console.error('Billing seed error:', error);
     return res.status(500).json({ message: 'Unable to seed billing data' });
+  }
+});
+
+/* ---------- Gateway settings ---------- */
+
+async function getOrCreateSettings() {
+  let doc = await BillingSettings.findOne().sort({ updatedAt: -1 });
+  if (!doc) {
+    doc = await BillingSettings.create({});
+  }
+  return doc;
+}
+
+router.get('/settings', async (_req, res) => {
+  try {
+    const settings = await getOrCreateSettings();
+    return res.json({ settings: settings.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing settings get error:', error);
+    return res.status(500).json({ message: 'Unable to load billing settings' });
+  }
+});
+
+router.put('/settings', requireBillingOperator, async (req, res) => {
+  try {
+    const settings = await getOrCreateSettings();
+    if (req.body?.merchantName != null) settings.merchantName = String(req.body.merchantName).trim();
+    if (req.body?.supportNote != null) settings.supportNote = String(req.body.supportNote).trim();
+    if (req.body?.upiVpa != null) settings.upiVpa = String(req.body.upiVpa).trim();
+    if (req.body?.cardLabel != null) settings.cardLabel = String(req.body.cardLabel).trim();
+    if (req.body?.methods && typeof req.body.methods === 'object') {
+      settings.methods = {
+        cash: req.body.methods.cash !== false,
+        card: req.body.methods.card !== false,
+        upi: req.body.methods.upi !== false,
+        qr: req.body.methods.qr !== false
+      };
+    }
+    settings.updatedBy = req.user._id;
+    await settings.save();
+    return res.json({ message: 'Gateway settings saved', settings: settings.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing settings update error:', error);
+    return res.status(500).json({ message: 'Unable to save billing settings' });
   }
 });
 

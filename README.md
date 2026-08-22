@@ -11,7 +11,9 @@ Frontend UI: [`maheshpcse/banking-system`](https://github.com/maheshpcse/banking
 - Deposit / withdraw
 - Peer transfers
 - Paginated transaction history
-- **Billing APIs** (`/api/billing`) — products, customers, bills, payments, complaints
+- **Billing APIs** (`/api/billing`) — products, customers, bills, payments, complaints, gateway settings
+  - Write ops: Manager / Admin only (not Super Admin)
+  - Read/monitor: Manager / Admin / Super Admin
 - In-memory MongoDB replica set for local demo (or real `MONGODB_URI`)
 
 ## Requirements
