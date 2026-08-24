@@ -21,6 +21,8 @@ const billSchema = new mongoose.Schema(
     items: { type: [billItemSchema], default: [] },
     subtotal: { type: Number, required: true, min: 0 },
     discount: { type: Number, required: true, min: 0, default: 0 },
+    couponCode: { type: String, trim: true, uppercase: true, default: null },
+    couponId: { type: mongoose.Schema.Types.ObjectId, ref: 'BillingCoupon', default: null },
     tax: { type: Number, required: true, min: 0, default: 0 },
     grandTotal: { type: Number, required: true, min: 0 },
     paymentStatus: {
@@ -57,6 +59,8 @@ billSchema.methods.toSafeJSON = function toSafeJSON() {
     })),
     subtotal: this.subtotal,
     discount: this.discount,
+    couponCode: this.couponCode || null,
+    couponId: this.couponId?.toString?.() || (this.couponId ? String(this.couponId) : null),
     tax: this.tax,
     grandTotal: this.grandTotal,
     paymentStatus: this.paymentStatus,
