@@ -27,7 +27,7 @@ const billSchema = new mongoose.Schema(
     grandTotal: { type: Number, required: true, min: 0 },
     paymentStatus: {
       type: String,
-      enum: ['draft', 'pending', 'paid', 'failed', 'refunded'],
+      enum: ['draft', 'pending', 'paid', 'failed', 'error', 'refunded'],
       default: 'pending',
       index: true
     },
@@ -36,6 +36,7 @@ const billSchema = new mongoose.Schema(
       enum: ['cash', 'card', 'upi', 'qr', null],
       default: null
     },
+    paidAt: { type: Date, default: null },
     notes: { type: String, trim: true, maxlength: 400, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
@@ -65,6 +66,7 @@ billSchema.methods.toSafeJSON = function toSafeJSON() {
     grandTotal: this.grandTotal,
     paymentStatus: this.paymentStatus,
     paymentMethod: this.paymentMethod,
+    paidAt: this.paidAt ? this.paidAt.toISOString?.() || this.paidAt : null,
     notes: this.notes || '',
     createdAt: this.createdAt?.toISOString?.() || this.createdAt,
     updatedAt: this.updatedAt?.toISOString?.() || this.updatedAt
