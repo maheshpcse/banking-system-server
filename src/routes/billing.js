@@ -460,6 +460,13 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       await couponDoc.save();
     }
 
+    await notifyManagers(
+      'billing',
+      'Invoice created',
+      `${bill.billNumber} · ${customer.name} · $${grandTotal.toFixed(2)} · bill created`,
+      '/notifications'
+    );
+
     return res.status(201).json({ message: 'Bill created', bill: bill.toSafeJSON() });
   } catch (error) {
     console.error('Billing bill create error:', error);
@@ -478,6 +485,12 @@ router.post('/bills/:id/await-payment', requireBillingOperator, async (req, res)
     }
     bill.paymentStatus = 'pending';
     await bill.save();
+    await notifyManagers(
+      'billing',
+      'Invoice payment pending',
+      `${bill.billNumber} · $${bill.grandTotal.toFixed(2)} awaiting payment`,
+      '/notifications'
+    );
     return res.json({ message: 'Bill awaiting payment', bill: bill.toSafeJSON() });
   } catch (error) {
     console.error('Billing await-payment error:', error);
@@ -556,7 +569,21 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
         'billing',
         'Invoice paid',
         `${bill.billNumber} settled via ${paymentMethod.toUpperCase()} · $${bill.grandTotal.toFixed(2)}`,
-        '/manager/billing'
+        '/notifications'
+      );
+    } else if (status === 'error') {
+      await notifyManagers(
+        'billing',
+        'Invoice payment error',
+        `${bill.billNumber} · ${paymentMethod.toUpperCase()} · $${bill.grandTotal.toFixed(2)} · gateway error`,
+        '/notifications'
+      );
+    } else {
+      await notifyManagers(
+        'billing',
+        'Invoice payment failure',
+        `${bill.billNumber} · ${paymentMethod.toUpperCase()} · $${bill.grandTotal.toFixed(2)} · declined`,
+        '/notifications'
       );
     }
 
