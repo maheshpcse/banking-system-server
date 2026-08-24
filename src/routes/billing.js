@@ -101,17 +101,32 @@ async function resolveCouponDiscount({ code, subtotal, paymentMethod }) {
 
 router.get('/dashboard/stats', async (_req, res) => {
   try {
-    const [productCount, customerCount, billCount, paidBills, openComplaints, recentBills] =
+    const [productCount, customerCount, billCount, paidBills, openComplaints, recentBills, statusGroups] =
       await Promise.all([
         BillingProduct.countDocuments({ active: true }),
         BillingCustomer.countDocuments(),
         Bill.countDocuments(),
         Bill.find({ paymentStatus: 'paid' }).select('grandTotal'),
         BillingComplaint.countDocuments({ status: { $in: ['open', 'escalated'] } }),
-        Bill.find().sort({ createdAt: -1 }).limit(6)
+        Bill.find().sort({ createdAt: -1 }).limit(6),
+        Bill.aggregate([{ $group: { _id: '$paymentStatus', count: { $sum: 1 } } }])
       ]);
 
     const totalSales = money(paidBills.reduce((sum, b) => sum + (b.grandTotal || 0), 0));
+    const statusCounts = {
+      draft: 0,
+      pending: 0,
+      paid: 0,
+      failed: 0,
+      error: 0,
+      refunded: 0
+    };
+    for (const row of statusGroups) {
+      const key = String(row._id || '');
+      if (Object.prototype.hasOwnProperty.call(statusCounts, key)) {
+        statusCounts[key] = row.count || 0;
+      }
+    }
 
     return res.json({
       totalSales,
@@ -119,6 +134,7 @@ router.get('/dashboard/stats', async (_req, res) => {
       totalProducts: productCount,
       totalCustomers: customerCount,
       openComplaints,
+      statusCounts,
       recentBills: recentBills.map((b) => b.toSafeJSON())
     });
   } catch (error) {
@@ -295,6 +311,7 @@ router.get('/bills', async (req, res) => {
     const customerId = String(req.query.customerId || '').trim();
     const from = String(req.query.from || '').trim();
     const to = String(req.query.to || '').trim();
+    const paymentStatus = String(req.query.paymentStatus || '').trim().toLowerCase();
 
     if (billId) {
       filter.$or = [
@@ -303,6 +320,9 @@ router.get('/bills', async (req, res) => {
       ];
     }
     if (customerId) filter.customer = customerId;
+    if (paymentStatus && ['draft', 'pending', 'paid', 'failed', 'error', 'refunded'].includes(paymentStatus)) {
+      filter.paymentStatus = paymentStatus;
+    }
     if (from || to) {
       filter.createdAt = {};
       if (from) filter.createdAt.$gte = new Date(from);
@@ -430,7 +450,7 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       couponId: couponDoc ? couponDoc._id : null,
       tax: finalTax,
       grandTotal,
-      paymentStatus: 'pending',
+      paymentStatus: 'draft',
       notes: String(req.body?.notes || '').trim(),
       createdBy: req.user._id
     });
@@ -444,6 +464,24 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing bill create error:', error);
     return res.status(500).json({ message: 'Unable to create bill' });
+  }
+});
+
+router.post('/bills/:id/await-payment', requireBillingOperator, async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    if (bill.paymentStatus === 'paid') {
+      return res.status(400).json({ message: 'Bill is already paid' });
+    }
+    bill.paymentStatus = 'pending';
+    await bill.save();
+    return res.json({ message: 'Bill awaiting payment', bill: bill.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing await-payment error:', error);
+    return res.status(500).json({ message: 'Unable to update bill' });
   }
 });
 
@@ -466,6 +504,7 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
     const billId = String(req.body?.billId || '').trim();
     const paymentMethod = String(req.body?.paymentMethod || '').trim().toLowerCase();
     const simulateFail = !!req.body?.simulateFail;
+    const simulateError = !!req.body?.simulateError;
 
     if (!billId || !['cash', 'card', 'upi', 'qr'].includes(paymentMethod)) {
       return res.status(400).json({ message: 'billId and a valid paymentMethod are required' });
@@ -479,12 +518,17 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
       return res.status(400).json({ message: 'Bill is already paid' });
     }
 
-    const status = simulateFail ? 'failed' : 'success';
+    let status = 'success';
+    if (simulateError) {
+      status = 'error';
+    } else if (simulateFail) {
+      status = 'failed';
+    }
     const payment = await Payment.create({
       bill: bill._id,
       billNumber: bill.billNumber,
       paymentMethod,
-      status,
+      status: status === 'success' ? 'success' : status === 'error' ? 'error' : 'failed',
       amount: bill.grandTotal,
       transactionRef: paymentRef(paymentMethod),
       meta: {
@@ -494,13 +538,17 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
         channel: String(req.body?.channel || 'portal-modal'),
         qrToken: paymentMethod === 'qr' ? crypto.randomBytes(8).toString('hex') : undefined,
         cardLast4: req.body?.cardLast4 ? String(req.body.cardLast4).slice(-4) : undefined,
-        upiVpa: req.body?.upiVpa ? String(req.body.upiVpa).trim() : undefined
+        upiVpa: req.body?.upiVpa ? String(req.body.upiVpa).trim() : undefined,
+        outcome: status
       },
       createdBy: req.user._id
     });
 
-    bill.paymentStatus = status === 'success' ? 'paid' : 'failed';
+    bill.paymentStatus = status === 'success' ? 'paid' : status === 'error' ? 'error' : 'failed';
     bill.paymentMethod = paymentMethod;
+    if (status === 'success') {
+      bill.paidAt = new Date();
+    }
     await bill.save();
 
     if (status === 'success') {
@@ -512,8 +560,15 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
       );
     }
 
+    const message =
+      status === 'success'
+        ? 'Payment successful'
+        : status === 'error'
+          ? 'Payment error (simulated gateway fault)'
+          : 'Payment failed (simulated decline)';
+
     return res.status(201).json({
-      message: status === 'success' ? 'Payment successful' : 'Payment failed (simulated)',
+      message,
       payment: payment.toSafeJSON(),
       bill: bill.toSafeJSON()
     });
