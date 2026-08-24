@@ -7,6 +7,7 @@ const Bill = require('../models/Bill');
 const Payment = require('../models/Payment');
 const BillingComplaint = require('../models/BillingComplaint');
 const BillingSettings = require('../models/BillingSettings');
+const BillingCoupon = require('../models/BillingCoupon');
 const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
 
 const router = express.Router();
@@ -53,6 +54,47 @@ function paymentRef(method) {
     .randomBytes(2)
     .toString('hex')
     .toUpperCase()}`;
+}
+
+/**
+ * Resolve coupon discount for a cart subtotal / optional payment method.
+ * Returns { ok, status, message, coupon?, discount? }.
+ */
+async function resolveCouponDiscount({ code, subtotal, paymentMethod }) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) {
+    return { ok: false, status: 400, message: 'Coupon code is required' };
+  }
+  const coupon = await BillingCoupon.findOne({ code: normalized });
+  if (!coupon || coupon.active === false) {
+    return { ok: false, status: 404, message: 'Coupon not found or inactive' };
+  }
+  if (coupon.isExpired()) {
+    return { ok: false, status: 400, message: 'Coupon has expired' };
+  }
+  if (coupon.isExhausted()) {
+    return { ok: false, status: 400, message: 'Coupon usage limit reached' };
+  }
+  const base = money(subtotal);
+  if (base < money(coupon.minSubtotal || 0)) {
+    return {
+      ok: false,
+      status: 400,
+      message: `Minimum subtotal of ${money(coupon.minSubtotal).toFixed(2)} required for this coupon`
+    };
+  }
+  if (paymentMethod && !coupon.allowsPaymentMethod(paymentMethod)) {
+    return {
+      ok: false,
+      status: 400,
+      message: `Coupon ${coupon.code} cannot be used with ${String(paymentMethod).toUpperCase()} payments`
+    };
+  }
+  const discount = coupon.computeDiscount(base);
+  if (discount <= 0) {
+    return { ok: false, status: 400, message: 'Coupon does not apply to this cart' };
+  }
+  return { ok: true, coupon, discount };
 }
 
 /* ---------- Dashboard ---------- */
@@ -313,7 +355,8 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
   try {
     const customerId = String(req.body?.customerId || '').trim();
     const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
-    const discount = money(req.body?.discount || 0);
+    let discount = money(req.body?.discount || 0);
+    const couponCodeRaw = String(req.body?.couponCode || '').trim().toUpperCase();
     if (!customerId || !rawItems.length) {
       return res.status(400).json({ message: 'Customer and at least one line item are required' });
     }
@@ -354,6 +397,20 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       await product.save();
     }
 
+    let couponDoc = null;
+    if (couponCodeRaw) {
+      const resolved = await resolveCouponDiscount({
+        code: couponCodeRaw,
+        subtotal,
+        paymentMethod: req.body?.paymentMethod
+      });
+      if (!resolved.ok) {
+        return res.status(resolved.status || 400).json({ message: resolved.message });
+      }
+      couponDoc = resolved.coupon;
+      discount = money(resolved.discount);
+    }
+
     const safeDiscount = Math.min(discount, subtotal);
     const taxableBase = money(subtotal - safeDiscount);
     // Re-scale tax proportionally after discount on net.
@@ -369,12 +426,19 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       items,
       subtotal,
       discount: safeDiscount,
+      couponCode: couponDoc ? couponDoc.code : null,
+      couponId: couponDoc ? couponDoc._id : null,
       tax: finalTax,
       grandTotal,
       paymentStatus: 'pending',
       notes: String(req.body?.notes || '').trim(),
       createdBy: req.user._id
     });
+
+    if (couponDoc) {
+      couponDoc.usedCount = Number(couponDoc.usedCount || 0) + 1;
+      await couponDoc.save();
+    }
 
     return res.status(201).json({ message: 'Bill created', bill: bill.toSafeJSON() });
   } catch (error) {
@@ -424,8 +488,13 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
       amount: bill.grandTotal,
       transactionRef: paymentRef(paymentMethod),
       meta: {
-        gateway: 'novabank-fake-pos',
-        qrToken: paymentMethod === 'qr' ? crypto.randomBytes(8).toString('hex') : undefined
+        gateway: 'novapay-checkout',
+        provider: String(req.body?.provider || 'novapay'),
+        sessionId: String(req.body?.sessionId || crypto.randomBytes(8).toString('hex')),
+        channel: String(req.body?.channel || 'portal-modal'),
+        qrToken: paymentMethod === 'qr' ? crypto.randomBytes(8).toString('hex') : undefined,
+        cardLast4: req.body?.cardLast4 ? String(req.body.cardLast4).slice(-4) : undefined,
+        upiVpa: req.body?.upiVpa ? String(req.body.upiVpa).trim() : undefined
       },
       createdBy: req.user._id
     });
@@ -616,6 +685,212 @@ router.post('/seed', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing seed error:', error);
     return res.status(500).json({ message: 'Unable to seed billing data' });
+  }
+});
+
+/* ---------- Coupons ---------- */
+
+router.get('/coupons', async (req, res) => {
+  try {
+    const includeInactive = String(req.query.includeInactive || '') === '1';
+    const filter = includeInactive ? {} : { active: true };
+    const items = await BillingCoupon.find(filter).sort({ updatedAt: -1 });
+    return res.json({ items: items.map((c) => c.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing coupons list error:', error);
+    return res.status(500).json({ message: 'Unable to load coupons' });
+  }
+});
+
+router.post('/coupons/validate', requireBillingOperator, async (req, res) => {
+  try {
+    const resolved = await resolveCouponDiscount({
+      code: req.body?.code,
+      subtotal: req.body?.subtotal,
+      paymentMethod: req.body?.paymentMethod
+    });
+    if (!resolved.ok) {
+      return res.status(resolved.status || 400).json({ message: resolved.message });
+    }
+    return res.json({
+      message: 'Coupon applied',
+      discount: resolved.discount,
+      coupon: resolved.coupon.toSafeJSON()
+    });
+  } catch (error) {
+    console.error('Billing coupon validate error:', error);
+    return res.status(500).json({ message: 'Unable to validate coupon' });
+  }
+});
+
+router.post('/coupons', requireBillingOperator, async (req, res) => {
+  try {
+    const code = String(req.body?.code || '').trim().toUpperCase();
+    const title = String(req.body?.title || '').trim();
+    const kind = String(req.body?.kind || 'general').trim().toLowerCase();
+    const discountType = String(req.body?.discountType || '').trim().toLowerCase();
+    const value = Number(req.body?.value);
+    const usageNote = String(req.body?.usageNote || '').trim();
+    const bankNote = String(req.body?.bankNote || '').trim();
+    const paymentScopes = Array.isArray(req.body?.paymentScopes)
+      ? req.body.paymentScopes.map((s) => String(s).toLowerCase())
+      : ['any'];
+
+    if (!code || code.length < 3) {
+      return res.status(400).json({ message: 'Coupon code must be at least 3 characters' });
+    }
+    if (!title) {
+      return res.status(400).json({ message: 'Coupon title is required' });
+    }
+    if (!['percent', 'fixed'].includes(discountType)) {
+      return res.status(400).json({ message: 'discountType must be percent or fixed' });
+    }
+    if (!(value >= 0) || (discountType === 'percent' && value > 100)) {
+      return res.status(400).json({ message: 'Invalid coupon value' });
+    }
+    if (!usageNote || usageNote.length < 8) {
+      return res.status(400).json({ message: 'Add a short usage note (at least 8 characters)' });
+    }
+    if (!['general', 'payment', 'bank'].includes(kind)) {
+      return res.status(400).json({ message: 'Invalid coupon kind' });
+    }
+    if (kind === 'bank' && !bankNote) {
+      return res.status(400).json({ message: 'Bank coupons require a bank usage note' });
+    }
+    const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt) : null;
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) {
+      return res.status(400).json({ message: 'Invalid expiry date' });
+    }
+    if (expiresAt && expiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ message: 'Expiry must be in the future' });
+    }
+
+    const existing = await BillingCoupon.findOne({ code });
+    if (existing) {
+      return res.status(409).json({ message: 'Coupon code already exists' });
+    }
+
+    const coupon = await BillingCoupon.create({
+      code,
+      title,
+      kind,
+      discountType,
+      value,
+      paymentScopes: paymentScopes.length ? paymentScopes : ['any'],
+      usageNote,
+      bankNote: kind === 'bank' ? bankNote : bankNote || '',
+      minSubtotal: money(req.body?.minSubtotal || 0),
+      maxDiscount:
+        req.body?.maxDiscount == null || req.body?.maxDiscount === ''
+          ? null
+          : money(req.body.maxDiscount),
+      expiresAt,
+      maxUses:
+        req.body?.maxUses == null || req.body?.maxUses === ''
+          ? null
+          : Math.max(1, Math.floor(Number(req.body.maxUses))),
+      active: req.body?.active !== false,
+      createdBy: req.user._id,
+      updatedBy: req.user._id
+    });
+
+    return res.status(201).json({ message: 'Coupon created', coupon: coupon.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing coupon create error:', error);
+    return res.status(500).json({ message: 'Unable to create coupon' });
+  }
+});
+
+router.put('/coupons/:id', requireBillingOperator, async (req, res) => {
+  try {
+    const coupon = await BillingCoupon.findById(req.params.id);
+    if (!coupon) {
+      return res.status(404).json({ message: 'Coupon not found' });
+    }
+
+    if (req.body?.title != null) coupon.title = String(req.body.title).trim();
+    if (req.body?.kind != null) {
+      const kind = String(req.body.kind).trim().toLowerCase();
+      if (!['general', 'payment', 'bank'].includes(kind)) {
+        return res.status(400).json({ message: 'Invalid coupon kind' });
+      }
+      coupon.kind = kind;
+    }
+    if (req.body?.discountType != null) {
+      const discountType = String(req.body.discountType).trim().toLowerCase();
+      if (!['percent', 'fixed'].includes(discountType)) {
+        return res.status(400).json({ message: 'discountType must be percent or fixed' });
+      }
+      coupon.discountType = discountType;
+    }
+    if (req.body?.value != null) {
+      const value = Number(req.body.value);
+      if (!(value >= 0) || (coupon.discountType === 'percent' && value > 100)) {
+        return res.status(400).json({ message: 'Invalid coupon value' });
+      }
+      coupon.value = value;
+    }
+    if (Array.isArray(req.body?.paymentScopes)) {
+      coupon.paymentScopes = req.body.paymentScopes.map((s) => String(s).toLowerCase());
+    }
+    if (req.body?.usageNote != null) {
+      const usageNote = String(req.body.usageNote).trim();
+      if (!usageNote || usageNote.length < 8) {
+        return res.status(400).json({ message: 'Add a short usage note (at least 8 characters)' });
+      }
+      coupon.usageNote = usageNote;
+    }
+    if (req.body?.bankNote != null) coupon.bankNote = String(req.body.bankNote).trim();
+    if (coupon.kind === 'bank' && !coupon.bankNote) {
+      return res.status(400).json({ message: 'Bank coupons require a bank usage note' });
+    }
+    if (req.body?.minSubtotal != null) coupon.minSubtotal = money(req.body.minSubtotal);
+    if (req.body?.maxDiscount !== undefined) {
+      coupon.maxDiscount =
+        req.body.maxDiscount == null || req.body.maxDiscount === ''
+          ? null
+          : money(req.body.maxDiscount);
+    }
+    if (req.body?.expiresAt !== undefined) {
+      if (!req.body.expiresAt) {
+        coupon.expiresAt = null;
+      } else {
+        const expiresAt = new Date(req.body.expiresAt);
+        if (Number.isNaN(expiresAt.getTime())) {
+          return res.status(400).json({ message: 'Invalid expiry date' });
+        }
+        coupon.expiresAt = expiresAt;
+      }
+    }
+    if (req.body?.maxUses !== undefined) {
+      coupon.maxUses =
+        req.body.maxUses == null || req.body.maxUses === ''
+          ? null
+          : Math.max(1, Math.floor(Number(req.body.maxUses)));
+    }
+    if (req.body?.active != null) coupon.active = !!req.body.active;
+    coupon.updatedBy = req.user._id;
+    await coupon.save();
+    return res.json({ message: 'Coupon updated', coupon: coupon.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing coupon update error:', error);
+    return res.status(500).json({ message: 'Unable to update coupon' });
+  }
+});
+
+router.delete('/coupons/:id', requireBillingOperator, async (req, res) => {
+  try {
+    const coupon = await BillingCoupon.findById(req.params.id);
+    if (!coupon) {
+      return res.status(404).json({ message: 'Coupon not found' });
+    }
+    coupon.active = false;
+    coupon.updatedBy = req.user._id;
+    await coupon.save();
+    return res.json({ message: 'Coupon deactivated', coupon: coupon.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing coupon delete error:', error);
+    return res.status(500).json({ message: 'Unable to delete coupon' });
   }
 });
 
