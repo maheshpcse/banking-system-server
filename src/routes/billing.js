@@ -498,6 +498,48 @@ router.post('/bills/:id/await-payment', requireBillingOperator, async (req, res)
   }
 });
 
+router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    const deletable = ['draft', 'pending', 'failed', 'error'];
+    if (!deletable.includes(bill.paymentStatus)) {
+      return res.status(400).json({
+        message: 'Only unpaid invoices (bill created, payment pending, failed, or error) can be deleted'
+      });
+    }
+
+    for (const item of bill.items || []) {
+      const productId = item.product?.toString?.() || String(item.product || '');
+      if (!productId) {
+        continue;
+      }
+      const product = await BillingProduct.findById(productId);
+      if (product) {
+        product.stock = Math.max(0, Number(product.stock || 0) + Math.max(0, Number(item.quantity) || 0));
+        await product.save();
+      }
+    }
+
+    await Payment.deleteMany({ bill: bill._id });
+    await bill.deleteOne();
+
+    await notifyManagers(
+      'billing',
+      'Invoice deleted',
+      `${bill.billNumber} · ${bill.customerName} · $${Number(bill.grandTotal || 0).toFixed(2)} removed`,
+      '/notifications'
+    );
+
+    return res.json({ message: 'Bill deleted' });
+  } catch (error) {
+    console.error('Billing bill delete error:', error);
+    return res.status(500).json({ message: 'Unable to delete bill' });
+  }
+});
+
 /* ---------- Payments (fake gateway) ---------- */
 
 router.get('/payments', async (req, res) => {
