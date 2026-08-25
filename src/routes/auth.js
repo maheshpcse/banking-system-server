@@ -61,19 +61,43 @@ async function findByIdentifier(identifier) {
   return User.findOne({ username: normalizeUsername(raw) });
 }
 
-function accountLifecycleBlock(user) {
+function accountLifecycleBlock(user, context = 'login') {
   const status = user.accountStatus || '';
   const support = getSupportEmail();
   if (status === 'blocked') {
+    if (context === 'forgot') {
+      return withSupport({
+        code: 'ACCOUNT_BLOCKED',
+        message: `This account is blocked, so password reset is not available. Contact ${support} or use Contact administrator to restore access. You may register a new account only with a different username and a different email.`
+      });
+    }
+    if (context === 'signup') {
+      return withSupport({
+        code: 'ACCOUNT_BLOCKED',
+        message: `This username or email belongs to a blocked account. You cannot sign up with the same username or email until staff restore access. Use a different username and a different email for a new account, or contact ${support} / Contact administrator.`
+      });
+    }
     return withSupport({
       code: 'ACCOUNT_BLOCKED',
-      message: `Your account has been blocked by staff. You cannot sign in, reset your password, or create another account with this username/email until access is restored. Contact ${support} or use the Contact administrator page.`
+      message: `Your account is blocked. You cannot sign in until staff restore access. Contact ${support} or use Contact administrator.`
     });
   }
   if (status === 'deactivated') {
+    if (context === 'forgot') {
+      return withSupport({
+        code: 'ACCOUNT_DEACTIVATED',
+        message: `This account is deactivated, so password reset is not available. Contact ${support} or use Contact administrator to reactivate access. You may register a new account only with a different username and a different email.`
+      });
+    }
+    if (context === 'signup') {
+      return withSupport({
+        code: 'ACCOUNT_DEACTIVATED',
+        message: `This username or email belongs to a deactivated account. You cannot sign up with the same username or email until staff reactivate access. Use a different username and a different email for a new account, or contact ${support} / Contact administrator.`
+      });
+    }
     return withSupport({
       code: 'ACCOUNT_DEACTIVATED',
-      message: `Your account has been deactivated by staff. You cannot sign in, reset your password, or create another account with this username/email until it is reactivated. Contact ${support} or use the Contact administrator page.`
+      message: `Your account is deactivated. You cannot sign in until staff reactivate access. Contact ${support} or use Contact administrator.`
     });
   }
   if (status === 'deleted') {
@@ -96,14 +120,14 @@ async function resolveDeletedReclaim(cleanEmail, cleanUsername) {
   const byUsername = await User.findOne({ username: cleanUsername });
 
   if (byEmail && byEmail.accountStatus !== 'deleted') {
-    const lifecycle = accountLifecycleBlock(byEmail);
+    const lifecycle = accountLifecycleBlock(byEmail, 'signup');
     if (lifecycle && (byEmail.accountStatus === 'blocked' || byEmail.accountStatus === 'deactivated')) {
       return { lifecycle };
     }
     return { conflict: 'email' };
   }
   if (byUsername && byUsername.accountStatus !== 'deleted') {
-    const lifecycle = accountLifecycleBlock(byUsername);
+    const lifecycle = accountLifecycleBlock(byUsername, 'signup');
     if (lifecycle && (byUsername.accountStatus === 'blocked' || byUsername.accountStatus === 'deactivated')) {
       return { lifecycle };
     }
@@ -166,10 +190,16 @@ router.post('/register', async (req, res) => {
       return res.status(403).json(resolved.lifecycle);
     }
     if (resolved.conflict === 'email') {
-      return res.status(409).json({ message: 'An account with this email already exists' });
+      return res.status(409).json({
+        code: 'EMAIL_IN_USE',
+        message: 'An active account already uses this email. Sign in, or use Forgot password if you need access.'
+      });
     }
     if (resolved.conflict === 'username') {
-      return res.status(409).json({ message: 'This username is already taken' });
+      return res.status(409).json({
+        code: 'USERNAME_IN_USE',
+        message: 'An active account already uses this username. Choose a different username, or sign in instead.'
+      });
     }
 
     const trimmedName = String(fullName).trim();
@@ -251,10 +281,16 @@ router.post('/register-staff', async (req, res) => {
       return res.status(403).json(resolved.lifecycle);
     }
     if (resolved.conflict === 'email') {
-      return res.status(409).json({ message: 'An account with this email already exists' });
+      return res.status(409).json({
+        code: 'EMAIL_IN_USE',
+        message: 'An active account already uses this email. Sign in, or use Forgot password if you need access.'
+      });
     }
     if (resolved.conflict === 'username') {
-      return res.status(409).json({ message: 'This username is already taken' });
+      return res.status(409).json({
+        code: 'USERNAME_IN_USE',
+        message: 'An active account already uses this username. Choose a different username, or sign in instead.'
+      });
     }
 
     const trimmedName = String(fullName).trim();
@@ -469,7 +505,7 @@ router.post('/forgot-password', async (req, res) => {
     // Blocked / deactivated cannot reset password. Soft-deleted accounts may continue
     // (same identity can re-register or complete reset before reclaim).
     if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
-      const lifecycle = accountLifecycleBlock(user);
+      const lifecycle = accountLifecycleBlock(user, 'forgot');
       return res.status(403).json(lifecycle);
     }
 
@@ -656,7 +692,7 @@ router.post('/reset-password', async (req, res) => {
     }
 
     if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
-      return res.status(403).json(accountLifecycleBlock(user));
+      return res.status(403).json(accountLifecycleBlock(user, 'forgot'));
     }
 
     user.password = password;
