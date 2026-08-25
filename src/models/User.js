@@ -98,7 +98,8 @@ const userSchema = new mongoose.Schema(
         'active',
         'rejected',
         'blocked',
-        'deactivated'
+        'deactivated',
+        'deleted'
       ],
       default: 'address_required'
     },

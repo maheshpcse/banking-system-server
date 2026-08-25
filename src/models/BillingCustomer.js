@@ -9,6 +9,7 @@ const billingCustomerSchema = new mongoose.Schema(
     /** Optional link into NovaBank ledger identity */
     bankingAccountNumber: { type: String, trim: true, maxlength: 32, default: null },
     bankingUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    rewardPoints: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
   { timestamps: true }
@@ -22,6 +23,7 @@ billingCustomerSchema.methods.toSafeJSON = function toSafeJSON() {
     phone: this.phone || '',
     address: this.address || '',
     bankingAccountNumber: this.bankingAccountNumber || null,
+    rewardPoints: Number(this.rewardPoints) || 0,
     createdAt: this.createdAt?.toISOString?.() || this.createdAt
   };
 };

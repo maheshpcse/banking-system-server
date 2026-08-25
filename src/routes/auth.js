@@ -50,6 +50,78 @@ async function findByIdentifier(identifier) {
   return User.findOne({ username: normalizeUsername(raw) });
 }
 
+function accountLifecycleBlock(user) {
+  const status = user.accountStatus || '';
+  if (status === 'blocked') {
+    return {
+      code: 'ACCOUNT_BLOCKED',
+      message:
+        'Your account has been blocked by staff. You cannot sign in. Please contact NovaBank staff to restore access.'
+    };
+  }
+  if (status === 'deactivated') {
+    return {
+      code: 'ACCOUNT_DEACTIVATED',
+      message:
+        'Your account has been deactivated by staff. You cannot sign in. Please contact NovaBank staff to reactivate your account.'
+    };
+  }
+  if (status === 'deleted') {
+    return {
+      code: 'ACCOUNT_DELETED',
+      message:
+        'This account was deleted by staff. You can no longer sign in. Please create a new account (you may reuse the same email or username).'
+    };
+  }
+  return null;
+}
+
+/**
+ * Reclaim a soft-deleted user for register / register-staff, or report 409 conflicts.
+ * Prefer email match; free username on a different deleted user when needed.
+ */
+async function resolveDeletedReclaim(cleanEmail, cleanUsername) {
+  const byEmail = await User.findOne({ email: cleanEmail });
+  const byUsername = await User.findOne({ username: cleanUsername });
+
+  if (byEmail && byEmail.accountStatus !== 'deleted') {
+    return { conflict: 'email' };
+  }
+  if (byUsername && byUsername.accountStatus !== 'deleted') {
+    return { conflict: 'username' };
+  }
+
+  const target = byEmail || byUsername || null;
+  if (!target) {
+    return { create: true };
+  }
+
+  if (byUsername && String(byUsername._id) !== String(target._id)) {
+    byUsername.username = `${String(byUsername.username || 'user').slice(0, 20)}.del.${Date.now()
+      .toString(36)
+      .slice(-6)}`;
+    await byUsername.save();
+  }
+
+  if (byEmail && String(byEmail._id) !== String(target._id)) {
+    byEmail.email = `deleted.${Date.now().toString(36)}.${byEmail.email}`;
+    await byEmail.save();
+  }
+
+  return { reclaim: target };
+}
+
+function initialsFromName(fullName) {
+  return String(fullName || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase();
+}
+
 router.post('/register', async (req, res) => {
   try {
     const { fullName, username, email, password } = req.body;
@@ -70,18 +142,42 @@ router.post('/register', async (req, res) => {
     }
 
     const cleanEmail = String(email).toLowerCase().trim();
-    const existingEmail = await User.findOne({ email: cleanEmail });
-    if (existingEmail) {
+    const resolved = await resolveDeletedReclaim(cleanEmail, cleanUsername);
+    if (resolved.conflict === 'email') {
       return res.status(409).json({ message: 'An account with this email already exists' });
     }
-
-    const existingUsername = await User.findOne({ username: cleanUsername });
-    if (existingUsername) {
+    if (resolved.conflict === 'username') {
       return res.status(409).json({ message: 'This username is already taken' });
     }
 
+    const trimmedName = String(fullName).trim();
+    const avatar = {
+      style: 'mint',
+      initials: initialsFromName(trimmedName)
+    };
+
+    if (resolved.reclaim) {
+      const user = resolved.reclaim;
+      user.fullName = trimmedName;
+      user.username = cleanUsername;
+      user.email = cleanEmail;
+      user.password = password;
+      user.accountStatus = 'address_required';
+      user.role = 'customer';
+      user.staffStatus = 'active';
+      user.isSuperAdmin = false;
+      user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+      user.avatar = { ...(user.avatar?.toObject?.() || user.avatar || {}), ...avatar };
+      await user.save();
+
+      return res.status(201).json({
+        message: 'Account created successfully',
+        user: user.toSafeJSON()
+      });
+    }
+
     const user = await User.create({
-      fullName: String(fullName).trim(),
+      fullName: trimmedName,
       username: cleanUsername,
       email: cleanEmail,
       password,
@@ -91,17 +187,7 @@ router.post('/register', async (req, res) => {
       staffStatus: 'active',
       isSuperAdmin: false,
       balance: 0,
-      avatar: {
-        style: 'mint',
-        initials: String(fullName)
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((part) => part[0])
-          .join('')
-          .toUpperCase()
-      }
+      avatar
     });
 
     return res.status(201).json({
@@ -138,36 +224,49 @@ router.post('/register-staff', async (req, res) => {
       });
     }
     const cleanEmail = String(email).toLowerCase().trim();
-    if (await User.findOne({ email: cleanEmail })) {
+    const resolved = await resolveDeletedReclaim(cleanEmail, cleanUsername);
+    if (resolved.conflict === 'email') {
       return res.status(409).json({ message: 'An account with this email already exists' });
     }
-    if (await User.findOne({ username: cleanUsername })) {
+    if (resolved.conflict === 'username') {
       return res.status(409).json({ message: 'This username is already taken' });
     }
 
-    const user = await User.create({
-      fullName: String(fullName).trim(),
-      username: cleanUsername,
-      email: cleanEmail,
-      password,
-      role: cleanRole,
-      isSuperAdmin: false,
-      staffStatus: 'pending_approval',
-      accountNumber: null,
-      accountStatus: 'active',
-      balance: 0,
-      avatar: {
-        style: 'slate',
-        initials: String(fullName)
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((part) => part[0])
-          .join('')
-          .toUpperCase()
-      }
-    });
+    const trimmedName = String(fullName).trim();
+    const avatar = {
+      style: 'slate',
+      initials: initialsFromName(trimmedName)
+    };
+
+    let user;
+    if (resolved.reclaim) {
+      user = resolved.reclaim;
+      user.fullName = trimmedName;
+      user.username = cleanUsername;
+      user.email = cleanEmail;
+      user.password = password;
+      user.role = cleanRole;
+      user.isSuperAdmin = false;
+      user.staffStatus = 'pending_approval';
+      user.accountStatus = 'active';
+      user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+      user.avatar = { ...(user.avatar?.toObject?.() || user.avatar || {}), ...avatar };
+      await user.save();
+    } else {
+      user = await User.create({
+        fullName: trimmedName,
+        username: cleanUsername,
+        email: cleanEmail,
+        password,
+        role: cleanRole,
+        isSuperAdmin: false,
+        staffStatus: 'pending_approval',
+        accountNumber: null,
+        accountStatus: 'active',
+        balance: 0,
+        avatar
+      });
+    }
 
     await notifySuperAdmins(
       'admin',
@@ -294,6 +393,11 @@ router.post('/login', async (req, res) => {
     if (user.loginAttempts?.count || user.loginAttempts?.lockedUntil) {
       user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
       await user.save();
+    }
+
+    const lifecycle = accountLifecycleBlock(user);
+    if (lifecycle) {
+      return res.status(403).json(lifecycle);
     }
 
     const role = user.role || 'customer';
