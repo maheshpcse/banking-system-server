@@ -8,7 +8,7 @@ const Payment = require('../models/Payment');
 const BillingComplaint = require('../models/BillingComplaint');
 const BillingSettings = require('../models/BillingSettings');
 const BillingCoupon = require('../models/BillingCoupon');
-const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
+const { notifyManagers, notifySuperAdmins, notifyContact } = require('../services/notify-channels');
 
 const router = express.Router();
 router.use(auth);
@@ -95,6 +95,15 @@ async function resolveCouponDiscount({ code, subtotal, paymentMethod }) {
     return { ok: false, status: 400, message: 'Coupon does not apply to this cart' };
   }
   return { ok: true, coupon, discount };
+}
+
+/** Soft-expire coupons past their expiresAt while still marked active. */
+async function expireCouponsNow() {
+  const now = new Date();
+  await BillingCoupon.updateMany(
+    { active: true, expiresAt: { $ne: null, $lt: now } },
+    { $set: { active: false } }
+  );
 }
 
 /* ---------- Dashboard ---------- */
@@ -467,6 +476,17 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       '/notifications'
     );
 
+    try {
+      await notifyContact({
+        email: customer.email,
+        phone: customer.phone,
+        title: 'Invoice created',
+        body: `Invoice ${bill.billNumber} for $${grandTotal.toFixed(2)} has been created.`
+      });
+    } catch (notifyError) {
+      console.warn('Invoice create customer notify failed:', notifyError.message);
+    }
+
     return res.status(201).json({ message: 'Bill created', bill: bill.toSafeJSON() });
   } catch (error) {
     console.error('Billing bill create error:', error);
@@ -537,6 +557,59 @@ router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing bill delete error:', error);
     return res.status(500).json({ message: 'Unable to delete bill' });
+  }
+});
+
+router.post('/bills/:id/ratings', requireBillingOperator, async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    if (bill.paymentStatus !== 'paid') {
+      return res.status(400).json({ message: 'Only paid invoices can be rated' });
+    }
+    if (bill.ratedAt) {
+      return res.status(400).json({ message: 'This invoice has already been rated' });
+    }
+
+    const ratings = Array.isArray(req.body?.ratings) ? req.body.ratings : [];
+    if (!ratings.length) {
+      return res.status(400).json({ message: 'At least one product rating is required' });
+    }
+
+    const billProductIds = new Set(
+      (bill.items || []).map((item) => item.product?.toString?.() || String(item.product || ''))
+    );
+    const updatedProducts = [];
+
+    for (const row of ratings) {
+      const productId = String(row?.productId || '').trim();
+      const stars = Math.floor(Number(row?.stars));
+      if (!productId || !billProductIds.has(productId)) {
+        return res.status(400).json({ message: `Product ${productId || '(missing)'} is not on this invoice` });
+      }
+      if (!(stars >= 1 && stars <= 5)) {
+        return res.status(400).json({ message: 'Each rating must be an integer from 1 to 5 stars' });
+      }
+
+      const product = await BillingProduct.findById(productId);
+      if (!product) {
+        return res.status(404).json({ message: `Product not found: ${productId}` });
+      }
+      product.ratingSum = Number(product.ratingSum || 0) + stars;
+      product.ratingCount = Number(product.ratingCount || 0) + 1;
+      await product.save();
+      updatedProducts.push(product.toSafeJSON());
+    }
+
+    bill.ratedAt = new Date();
+    await bill.save();
+
+    return res.json({ message: 'Ratings saved', products: updatedProducts });
+  } catch (error) {
+    console.error('Billing bill ratings error:', error);
+    return res.status(500).json({ message: 'Unable to save ratings' });
   }
 });
 
@@ -613,6 +686,31 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
         `${bill.billNumber} settled via ${paymentMethod.toUpperCase()} · $${bill.grandTotal.toFixed(2)}`,
         '/notifications'
       );
+
+      try {
+        const customer = await BillingCustomer.findById(bill.customer);
+        if (customer) {
+          await notifyContact({
+            email: customer.email,
+            phone: customer.phone,
+            title: 'Invoice paid',
+            body: `Invoice ${bill.billNumber} for $${Number(bill.grandTotal || 0).toFixed(2)} has been paid. Thank you!`
+          });
+
+          const points = Math.max(1, Math.floor(Number(bill.grandTotal) || 0));
+          customer.rewardPoints = Number(customer.rewardPoints || 0) + points;
+          await customer.save();
+
+          await notifyContact({
+            email: customer.email,
+            phone: customer.phone,
+            title: 'Rewards earned',
+            body: `You earned ${points} reward point${points === 1 ? '' : 's'} for invoice ${bill.billNumber}. Balance: ${customer.rewardPoints}.`
+          });
+        }
+      } catch (notifyError) {
+        console.warn('Invoice paid customer notify/rewards failed:', notifyError.message);
+      }
     } else if (status === 'error') {
       await notifyManagers(
         'billing',
@@ -816,6 +914,7 @@ router.post('/seed', requireBillingOperator, async (req, res) => {
 
 router.get('/coupons', async (req, res) => {
   try {
+    await expireCouponsNow();
     const includeInactive = String(req.query.includeInactive || '') === '1';
     const filter = includeInactive ? {} : { active: true };
     const items = await BillingCoupon.find(filter).sort({ updatedAt: -1 });
@@ -828,6 +927,7 @@ router.get('/coupons', async (req, res) => {
 
 router.post('/coupons/validate', requireBillingOperator, async (req, res) => {
   try {
+    await expireCouponsNow();
     const resolved = await resolveCouponDiscount({
       code: req.body?.code,
       subtotal: req.body?.subtotal,
@@ -1008,13 +1108,27 @@ router.delete('/coupons/:id', requireBillingOperator, async (req, res) => {
     if (!coupon) {
       return res.status(404).json({ message: 'Coupon not found' });
     }
+    await coupon.deleteOne();
+    return res.json({ message: 'Coupon deleted' });
+  } catch (error) {
+    console.error('Billing coupon delete error:', error);
+    return res.status(500).json({ message: 'Unable to delete coupon' });
+  }
+});
+
+router.post('/coupons/:id/deactivate', requireBillingOperator, async (req, res) => {
+  try {
+    const coupon = await BillingCoupon.findById(req.params.id);
+    if (!coupon) {
+      return res.status(404).json({ message: 'Coupon not found' });
+    }
     coupon.active = false;
     coupon.updatedBy = req.user._id;
     await coupon.save();
     return res.json({ message: 'Coupon deactivated', coupon: coupon.toSafeJSON() });
   } catch (error) {
-    console.error('Billing coupon delete error:', error);
-    return res.status(500).json({ message: 'Unable to delete coupon' });
+    console.error('Billing coupon deactivate error:', error);
+    return res.status(500).json({ message: 'Unable to deactivate coupon' });
   }
 });
 

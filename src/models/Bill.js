@@ -37,6 +37,7 @@ const billSchema = new mongoose.Schema(
       default: null
     },
     paidAt: { type: Date, default: null },
+    ratedAt: { type: Date, default: null },
     notes: { type: String, trim: true, maxlength: 400, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
@@ -67,6 +68,7 @@ billSchema.methods.toSafeJSON = function toSafeJSON() {
     paymentStatus: this.paymentStatus,
     paymentMethod: this.paymentMethod,
     paidAt: this.paidAt ? this.paidAt.toISOString?.() || this.paidAt : null,
+    ratedAt: this.ratedAt ? this.ratedAt.toISOString?.() || this.ratedAt : null,
     notes: this.notes || '',
     createdAt: this.createdAt?.toISOString?.() || this.createdAt,
     updatedAt: this.updatedAt?.toISOString?.() || this.updatedAt

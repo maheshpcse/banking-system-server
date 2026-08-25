@@ -251,6 +251,42 @@ async function notifySuperAdmins(kind, title, body, href, channelOpts = {}) {
   }
 }
 
+/**
+ * Notify a billing contact (customer email/phone) without requiring a User account.
+ * @param {object} opts
+ * @param {string} [opts.email]
+ * @param {string} [opts.phone]
+ * @param {string} opts.title
+ * @param {string} opts.body
+ * @param {string} [opts.brand='NovaBill']
+ */
+async function notifyContact({ email, phone, title, body, brand = 'NovaBill' }) {
+  const channels = [];
+  const emailTo = email ? String(email).trim() : '';
+  const phoneRaw = phone ? String(phone).trim() : '';
+
+  if (emailTo) {
+    channels.push(
+      sendEmail({
+        to: emailTo,
+        subject: `[${brand}] ${title}`,
+        text: `${body}\n\n— ${brand}`
+      })
+    );
+  }
+
+  if (phoneRaw) {
+    const to = phoneRaw.startsWith('+') ? phoneRaw : phoneRaw;
+    channels.push(sendSms({ to, body: `${brand}: ${title} — ${body}` }));
+  }
+
+  if (channels.length) {
+    await Promise.allSettled(channels);
+  }
+
+  return { emailed: !!emailTo, sms: !!phoneRaw };
+}
+
 module.exports = {
   createInApp,
   notifyUser,
@@ -258,6 +294,7 @@ module.exports = {
   notifyUsers,
   notifyManagers,
   notifySuperAdmins,
+  notifyContact,
   sendEmail,
   sendSms,
   emailConfigured,
