@@ -194,34 +194,6 @@ async function notifyUser(userOrId, opts) {
   return doc;
 }
 
-/**
- * Lifecycle/ops notify: email only when email is set, SMS only when
- * countryCode+phone are set. Uses forceEmail/forceSms when those contacts exist
- * so preference toggles do not suppress staff-driven account messages.
- */
-async function notifyContact(userOrId, opts) {
-  let user = userOrId;
-  if (!user || typeof user !== 'object' || !('email' in user)) {
-    user = await User.findById(userOrId?._id || userOrId).select(
-      'email fullName countryCode phone settings isSuperAdmin role'
-    );
-  }
-  if (!user) {
-    return null;
-  }
-
-  const hasEmail = !!String(user.email || '').trim();
-  const hasPhone = !!(
-    String(user.countryCode || '').trim() && String(user.phone || '').replace(/[\s()-]/g, '').trim()
-  );
-
-  return notifyUser(user, {
-    ...opts,
-    forceEmail: hasEmail,
-    forceSms: hasPhone
-  });
-}
-
 async function notifyUsers(query, opts) {
   const users = await User.find(query).select('email fullName countryCode phone settings isSuperAdmin role');
   await Promise.allSettled(users.map((u) => notifyUser(u, opts)));
