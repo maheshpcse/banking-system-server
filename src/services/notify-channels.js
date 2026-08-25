@@ -195,11 +195,11 @@ async function notifyUser(userOrId, opts) {
 }
 
 /**
- * Lifecycle/ops notify: email only when email is set, SMS only when
+ * Lifecycle/ops notify for a User: email only when email is set, SMS only when
  * countryCode+phone are set. Uses forceEmail/forceSms when those contacts exist
  * so preference toggles do not suppress staff-driven account messages.
  */
-async function notifyContact(userOrId, opts) {
+async function notifyAccountContact(userOrId, opts) {
   let user = userOrId;
   if (!user || typeof user !== 'object' || !('email' in user)) {
     user = await User.findById(userOrId?._id || userOrId).select(
@@ -253,14 +253,8 @@ async function notifySuperAdmins(kind, title, body, href, channelOpts = {}) {
 
 /**
  * Notify a billing contact (customer email/phone) without requiring a User account.
- * @param {object} opts
- * @param {string} [opts.email]
- * @param {string} [opts.phone]
- * @param {string} opts.title
- * @param {string} opts.body
- * @param {string} [opts.brand='NovaBill']
  */
-async function notifyContact({ email, phone, title, body, brand = 'NovaBill' }) {
+async function notifyBillingContact({ email, phone, title, body, brand = 'NovaBill' }) {
   const channels = [];
   const emailTo = email ? String(email).trim() : '';
   const phoneRaw = phone ? String(phone).trim() : '';
@@ -290,11 +284,13 @@ async function notifyContact({ email, phone, title, body, brand = 'NovaBill' }) 
 module.exports = {
   createInApp,
   notifyUser,
-  notifyContact,
+  notifyAccountContact,
+  notifyBillingContact,
+  /** @deprecated alias — prefer notifyBillingContact */
+  notifyContact: notifyBillingContact,
   notifyUsers,
   notifyManagers,
   notifySuperAdmins,
-  notifyContact,
   sendEmail,
   sendSms,
   emailConfigured,

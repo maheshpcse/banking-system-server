@@ -1,7 +1,7 @@
 const express = require('express');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
-const { notifyUser, notifyContact } = require('../services/notify-channels');
+const { notifyUser, notifyAccountContact } = require('../services/notify-channels');
 const { generateAccountNumber } = require('../utils/helpers');
 const {
   hydrateUser,
@@ -678,7 +678,7 @@ router.post('/limit-requests/:userId/reject', requireManagerOrSuperAdmin, async 
   }
 });
 
-router.get('/analytics', async (_req, res) => {
+router.get('/analytics', async (req, res) => {
   try {
     let Transaction;
     try {
@@ -692,34 +692,57 @@ router.get('/analytics', async (_req, res) => {
     }
 
     const customerFilter = {
-      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
+      $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }],
+      accountStatus: { $ne: 'deleted' }
     };
     const staffFilter = {
       role: { $in: ['manager', 'admin'] },
-      isSuperAdmin: { $ne: true }
+      isSuperAdmin: { $ne: true },
+      accountStatus: { $ne: 'deleted' }
     };
     const [total, active, underReview, blocked, managers, admins, staffPending] = await Promise.all([
       User.countDocuments(customerFilter),
       User.countDocuments({ ...customerFilter, accountStatus: { $in: ['active', 'approved'] } }),
       User.countDocuments({ ...customerFilter, accountStatus: 'under_review' }),
       User.countDocuments({ ...customerFilter, accountStatus: { $in: ['blocked', 'deactivated'] } }),
-      User.countDocuments({ role: 'manager', isSuperAdmin: { $ne: true } }),
-      User.countDocuments({ role: 'admin', isSuperAdmin: { $ne: true } }),
+      User.countDocuments({ role: 'manager', isSuperAdmin: { $ne: true }, accountStatus: { $ne: 'deleted' } }),
+      User.countDocuments({ role: 'admin', isSuperAdmin: { $ne: true }, accountStatus: { $ne: 'deleted' } }),
       User.countDocuments({ ...staffFilter, staffStatus: 'pending_approval' })
     ]);
 
-    const since = new Date();
-    since.setDate(since.getDate() - 13);
-    since.setHours(0, 0, 0, 0);
+    const typeFilter = String(req.query.type || '').trim().toLowerCase();
+    let since = new Date();
+    let until = null;
+    const fromRaw = String(req.query.from || '').trim();
+    const toRaw = String(req.query.to || '').trim();
+    if (fromRaw) {
+      since = new Date(fromRaw);
+      since.setHours(0, 0, 0, 0);
+    } else {
+      since.setDate(since.getDate() - 13);
+      since.setHours(0, 0, 0, 0);
+    }
+    if (toRaw) {
+      until = new Date(toRaw);
+      until.setHours(23, 59, 59, 999);
+    }
+
+    const createdMatch = { createdAt: { $gte: since } };
+    if (until) createdMatch.createdAt.$lte = until;
+    if (typeFilter === 'deposit' || typeFilter === 'withdraw') {
+      createdMatch.type = typeFilter;
+    } else if (typeFilter === 'transfer') {
+      createdMatch.type = { $in: ['transfer_in', 'transfer_out'] };
+    }
 
     const volumeByType = await Transaction.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: createdMatch },
       { $group: { _id: '$type', total: { $sum: '$amount' }, count: { $sum: 1 } } },
       { $sort: { total: -1 } }
     ]);
 
     const dailyFlow = await Transaction.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: createdMatch },
       {
         $group: {
           _id: {
