@@ -49,6 +49,56 @@ function nextBillNumber() {
   return `NB-INV-${stamp}-${rand}`;
 }
 
+/** Pending payment window — unpaid pending bills expire into failure. */
+const PENDING_PAYMENT_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+async function expirePendingBills() {
+  const now = new Date();
+  const cutoff = new Date(Date.now() - PENDING_PAYMENT_TTL_MS);
+  const result = await Bill.updateMany(
+    {
+      paymentStatus: 'pending',
+      $or: [
+        { paymentExpiresAt: { $ne: null, $lte: now } },
+        { $and: [{ $or: [{ paymentExpiresAt: null }, { paymentExpiresAt: { $exists: false } }] }, { updatedAt: { $lte: cutoff } }] }
+      ]
+    },
+    {
+      $set: {
+        paymentStatus: 'failed',
+        statusReason: 'Payment window expired before settlement.'
+      }
+    }
+  );
+  return result?.modifiedCount || 0;
+}
+
+async function backfillCustomerRewards(customer) {
+  if (!customer) {
+    return customer;
+  }
+  const unpaidRewards = await Bill.find({
+    customer: customer._id,
+    paymentStatus: 'paid',
+    rewardsAwarded: { $ne: true }
+  });
+  if (!unpaidRewards.length) {
+    return customer;
+  }
+  let added = 0;
+  for (const bill of unpaidRewards) {
+    const points = Math.max(1, Math.floor(Number(bill.grandTotal) || 0));
+    added += points;
+    bill.rewardsAwarded = true;
+    await bill.save();
+  }
+  if (added > 0) {
+    customer.rewardPoints = Number(customer.rewardPoints || 0) + added;
+    await customer.save();
+  }
+  return customer;
+}
+
 function paymentRef(method) {
   return `PAY-${String(method || 'X').toUpperCase()}-${Date.now().toString(36).toUpperCase()}-${crypto
     .randomBytes(2)
@@ -249,7 +299,11 @@ router.get('/customers', async (req, res) => {
       ];
     }
     const items = await BillingCustomer.find(filter).sort({ name: 1 });
-    return res.json({ items: items.map((c) => c.toSafeJSON()) });
+    const synced = [];
+    for (const customer of items) {
+      synced.push(await backfillCustomerRewards(customer));
+    }
+    return res.json({ items: synced.map((c) => c.toSafeJSON()) });
   } catch (error) {
     console.error('Billing customers list error:', error);
     return res.status(500).json({ message: 'Unable to load customers' });
@@ -315,6 +369,7 @@ router.delete('/customers/:id', requireBillingOperator, async (req, res) => {
 
 router.get('/bills', async (req, res) => {
   try {
+    await expirePendingBills();
     const filter = {};
     const billId = String(req.query.billId || req.query.q || '').trim();
     const customerId = String(req.query.customerId || '').trim();
@@ -365,6 +420,7 @@ router.get('/bills', async (req, res) => {
 
 router.get('/bills/:id', async (req, res) => {
   try {
+    await expirePendingBills();
     const bill = await Bill.findById(req.params.id);
     if (!bill) {
       return res.status(404).json({ message: 'Bill not found' });
@@ -504,11 +560,13 @@ router.post('/bills/:id/await-payment', requireBillingOperator, async (req, res)
       return res.status(400).json({ message: 'Bill is already paid' });
     }
     bill.paymentStatus = 'pending';
+    bill.paymentExpiresAt = new Date(Date.now() + PENDING_PAYMENT_TTL_MS);
+    bill.statusReason = '';
     await bill.save();
     await notifyManagers(
       'billing',
       'Invoice payment pending',
-      `${bill.billNumber} · $${bill.grandTotal.toFixed(2)} awaiting payment`,
+      `${bill.billNumber} · $${bill.grandTotal.toFixed(2)} awaiting payment (expires ${bill.paymentExpiresAt.toISOString()})`,
       '/notifications'
     );
     return res.json({ message: 'Bill awaiting payment', bill: bill.toSafeJSON() });
@@ -557,6 +615,82 @@ router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing bill delete error:', error);
     return res.status(500).json({ message: 'Unable to delete bill' });
+  }
+});
+
+/* ---------- Purchases (paid line items) ---------- */
+
+router.get('/purchases', async (req, res) => {
+  try {
+    await expirePendingBills();
+    const q = String(req.query.q || '').trim();
+    const customerId = String(req.query.customerId || '').trim();
+    const productId = String(req.query.productId || '').trim();
+    const method = String(req.query.paymentMethod || '').trim().toLowerCase();
+    const from = String(req.query.from || '').trim();
+    const to = String(req.query.to || '').trim();
+
+    const filter = { paymentStatus: 'paid' };
+    if (customerId) filter.customer = customerId;
+    if (method && ['cash', 'card', 'upi', 'qr'].includes(method)) {
+      filter.paymentMethod = method;
+    }
+    if (from || to) {
+      filter.paidAt = {};
+      if (from) filter.paidAt.$gte = new Date(from);
+      if (to) {
+        const end = new Date(to);
+        end.setHours(23, 59, 59, 999);
+        filter.paidAt.$lte = end;
+      }
+    }
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { billNumber: new RegExp(safe, 'i') },
+        { customerName: new RegExp(safe, 'i') },
+        { 'items.name': new RegExp(safe, 'i') }
+      ];
+    }
+
+    const bills = await Bill.find(filter).sort({ paidAt: -1, createdAt: -1 }).limit(400);
+    let rows = [];
+    for (const bill of bills) {
+      for (const item of bill.items || []) {
+        const pid = item.product?.toString?.() || String(item.product || '');
+        if (productId && pid !== productId) {
+          continue;
+        }
+        rows.push({
+          id: `${bill._id.toString()}:${pid}:${item.name}`,
+          billId: bill._id.toString(),
+          billNumber: bill.billNumber,
+          customerId: bill.customer?.toString?.() || String(bill.customer),
+          customerName: bill.customerName,
+          productId: pid,
+          productName: item.name,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          lineTotal: item.lineTotal,
+          paymentMethod: bill.paymentMethod || null,
+          paidAt: bill.paidAt ? bill.paidAt.toISOString?.() || bill.paidAt : null,
+          rated: !!bill.ratedAt,
+          grandTotal: bill.grandTotal
+        });
+      }
+    }
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(5, Number(req.query.limit) || 12));
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const start = (page - 1) * limit;
+    rows = rows.slice(start, start + limit);
+
+    return res.json({ items: rows, page, limit, total, pages });
+  } catch (error) {
+    console.error('Billing purchases list error:', error);
+    return res.status(500).json({ message: 'Unable to load purchases' });
   }
 });
 
@@ -676,6 +810,12 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
     bill.paymentMethod = paymentMethod;
     if (status === 'success') {
       bill.paidAt = new Date();
+      bill.paymentExpiresAt = null;
+      bill.statusReason = '';
+    } else if (status === 'error') {
+      bill.statusReason = 'Gateway error while processing payment.';
+    } else {
+      bill.statusReason = 'Payment declined by the simulated gateway.';
     }
     await bill.save();
 
@@ -697,16 +837,20 @@ router.post('/payments', requireBillingOperator, async (req, res) => {
             body: `Invoice ${bill.billNumber} for $${Number(bill.grandTotal || 0).toFixed(2)} has been paid. Thank you!`
           });
 
-          const points = Math.max(1, Math.floor(Number(bill.grandTotal) || 0));
-          customer.rewardPoints = Number(customer.rewardPoints || 0) + points;
-          await customer.save();
+          if (!bill.rewardsAwarded) {
+            const points = Math.max(1, Math.floor(Number(bill.grandTotal) || 0));
+            customer.rewardPoints = Number(customer.rewardPoints || 0) + points;
+            await customer.save();
+            bill.rewardsAwarded = true;
+            await bill.save();
 
-          await notifyContact({
-            email: customer.email,
-            phone: customer.phone,
-            title: 'Rewards earned',
-            body: `You earned ${points} reward point${points === 1 ? '' : 's'} for invoice ${bill.billNumber}. Balance: ${customer.rewardPoints}.`
-          });
+            await notifyContact({
+              email: customer.email,
+              phone: customer.phone,
+              title: 'Rewards earned',
+              body: `You earned ${points} reward point${points === 1 ? '' : 's'} for invoice ${bill.billNumber}. Balance: ${customer.rewardPoints}.`
+            });
+          }
         }
       } catch (notifyError) {
         console.warn('Invoice paid customer notify/rewards failed:', notifyError.message);

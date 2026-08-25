@@ -196,7 +196,7 @@ router.patch('/customers/:id/status', async (req, res) => {
       body = 'Your NovaBank account is active again. You can sign in and use banking features as usual.';
     }
 
-    await notifyContact(user, {
+    await notifyAccountContact(user, {
       kind: 'admin',
       title,
       body,
@@ -255,7 +255,7 @@ router.delete('/customers/:id', async (req, res) => {
       return res.json({ message: 'Customer already deleted', user: user.toSafeJSON() });
     }
 
-    await notifyContact(user, {
+    await notifyAccountContact(user, {
       kind: 'admin',
       title: 'Account deleted',
       body:
@@ -513,7 +513,7 @@ router.patch('/staff/:userId/status', requireSuperAdmin, async (req, res) => {
       body = 'Your NovaBank staff account is active again. You can sign in to the staff portal.';
     }
 
-    await notifyContact(user, {
+    await notifyAccountContact(user, {
       kind: 'admin',
       title,
       body,
@@ -543,7 +543,7 @@ router.delete('/staff/:userId', requireSuperAdmin, async (req, res) => {
       return res.json({ message: 'Staff account already deleted', user: user.toSafeJSON() });
     }
 
-    await notifyContact(user, {
+    await notifyAccountContact(user, {
       kind: 'admin',
       title: 'Staff account deleted',
       body:
