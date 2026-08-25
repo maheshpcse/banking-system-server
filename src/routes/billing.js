@@ -588,6 +588,16 @@ router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
         message: 'Only unpaid invoices (bill created, payment pending, failed, or error) can be deleted'
       });
     }
+    const expiredFailure =
+      bill.paymentStatus === 'failed' &&
+      String(bill.statusReason || '')
+        .toLowerCase()
+        .includes('payment window expired');
+    if (expiredFailure) {
+      return res.status(400).json({
+        message: 'Expired payment-failure invoices cannot be deleted. Contact a Super Admin if needed.'
+      });
+    }
 
     for (const item of bill.items || []) {
       const productId = item.product?.toString?.() || String(item.product || '');
@@ -673,7 +683,9 @@ router.get('/purchases', async (req, res) => {
           unitPrice: item.unitPrice,
           lineTotal: item.lineTotal,
           paymentMethod: bill.paymentMethod || null,
+          paymentStatus: bill.paymentStatus,
           paidAt: bill.paidAt ? bill.paidAt.toISOString?.() || bill.paidAt : null,
+          createdAt: bill.createdAt ? bill.createdAt.toISOString?.() || bill.createdAt : null,
           rated: !!bill.ratedAt,
           grandTotal: bill.grandTotal
         });
@@ -713,7 +725,13 @@ router.post('/bills/:id/ratings', requireBillingOperator, async (req, res) => {
     }
 
     const billProductIds = new Set(
-      (bill.items || []).map((item) => item.product?.toString?.() || String(item.product || ''))
+      (bill.items || []).map((item) => {
+        const raw = item.product;
+        if (raw && typeof raw === 'object' && raw._id) {
+          return String(raw._id);
+        }
+        return raw?.toString?.() || String(raw || '');
+      })
     );
     const updatedProducts = [];
 
@@ -727,13 +745,14 @@ router.post('/bills/:id/ratings', requireBillingOperator, async (req, res) => {
         return res.status(400).json({ message: 'Each rating must be an integer from 1 to 5 stars' });
       }
 
-      const product = await BillingProduct.findById(productId);
+      const product = await BillingProduct.findByIdAndUpdate(
+        productId,
+        { $inc: { ratingSum: stars, ratingCount: 1 } },
+        { new: true }
+      );
       if (!product) {
         return res.status(404).json({ message: `Product not found: ${productId}` });
       }
-      product.ratingSum = Number(product.ratingSum || 0) + stars;
-      product.ratingCount = Number(product.ratingCount || 0) + 1;
-      await product.save();
       updatedProducts.push(product.toSafeJSON());
     }
 
