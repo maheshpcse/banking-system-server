@@ -1,6 +1,7 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const ContactAdminRequest = require('../models/ContactAdminRequest');
 const auth = require('../middleware/auth');
 const { hydrateUser } = require('../services/user-domain');
 const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
@@ -12,6 +13,16 @@ const FONTS = User.FONTS || ['comfortable', 'compact', 'large', 'editorial', 'te
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'AED', 'JPY', 'CAD', 'AUD'];
 const COLOR_MODES = ['light', 'dark'];
 const AVATAR_PRESET_RE = /^(customer|manager|admin)\/preset-[0-9]{2}$/;
+
+function getSupportEmail() {
+  return String(process.env.SUPPORT_EMAIL || process.env.ADMIN_EMAIL || 'support@novabank.local')
+    .trim()
+    .toLowerCase();
+}
+
+function withSupport(payload) {
+  return { ...payload, supportEmail: getSupportEmail() };
+}
 
 function signToken(user) {
   return jwt.sign(
@@ -52,26 +63,25 @@ async function findByIdentifier(identifier) {
 
 function accountLifecycleBlock(user) {
   const status = user.accountStatus || '';
+  const support = getSupportEmail();
   if (status === 'blocked') {
-    return {
+    return withSupport({
       code: 'ACCOUNT_BLOCKED',
-      message:
-        'Your account has been blocked by staff. You cannot sign in. Please contact NovaBank staff to restore access.'
-    };
+      message: `Your account has been blocked by staff. You cannot sign in, reset your password, or create another account with this username/email until access is restored. Contact ${support} or use the Contact administrator page.`
+    });
   }
   if (status === 'deactivated') {
-    return {
+    return withSupport({
       code: 'ACCOUNT_DEACTIVATED',
-      message:
-        'Your account has been deactivated by staff. You cannot sign in. Please contact NovaBank staff to reactivate your account.'
-    };
+      message: `Your account has been deactivated by staff. You cannot sign in, reset your password, or create another account with this username/email until it is reactivated. Contact ${support} or use the Contact administrator page.`
+    });
   }
   if (status === 'deleted') {
-    return {
+    return withSupport({
       code: 'ACCOUNT_DELETED',
       message:
         'This account was deleted by staff. You can no longer sign in. Please create a new account (you may reuse the same email or username).'
-    };
+    });
   }
   return null;
 }
@@ -79,15 +89,24 @@ function accountLifecycleBlock(user) {
 /**
  * Reclaim a soft-deleted user for register / register-staff, or report 409 conflicts.
  * Prefer email match; free username on a different deleted user when needed.
+ * Blocked/deactivated accounts cannot be reclaimed — return lifecycle instead.
  */
 async function resolveDeletedReclaim(cleanEmail, cleanUsername) {
   const byEmail = await User.findOne({ email: cleanEmail });
   const byUsername = await User.findOne({ username: cleanUsername });
 
   if (byEmail && byEmail.accountStatus !== 'deleted') {
+    const lifecycle = accountLifecycleBlock(byEmail);
+    if (lifecycle && (byEmail.accountStatus === 'blocked' || byEmail.accountStatus === 'deactivated')) {
+      return { lifecycle };
+    }
     return { conflict: 'email' };
   }
   if (byUsername && byUsername.accountStatus !== 'deleted') {
+    const lifecycle = accountLifecycleBlock(byUsername);
+    if (lifecycle && (byUsername.accountStatus === 'blocked' || byUsername.accountStatus === 'deactivated')) {
+      return { lifecycle };
+    }
     return { conflict: 'username' };
   }
 
@@ -143,6 +162,9 @@ router.post('/register', async (req, res) => {
 
     const cleanEmail = String(email).toLowerCase().trim();
     const resolved = await resolveDeletedReclaim(cleanEmail, cleanUsername);
+    if (resolved.lifecycle) {
+      return res.status(403).json(resolved.lifecycle);
+    }
     if (resolved.conflict === 'email') {
       return res.status(409).json({ message: 'An account with this email already exists' });
     }
@@ -225,6 +247,9 @@ router.post('/register-staff', async (req, res) => {
     }
     const cleanEmail = String(email).toLowerCase().trim();
     const resolved = await resolveDeletedReclaim(cleanEmail, cleanUsername);
+    if (resolved.lifecycle) {
+      return res.status(403).json(resolved.lifecycle);
+    }
     if (resolved.conflict === 'email') {
       return res.status(409).json({ message: 'An account with this email already exists' });
     }
@@ -441,6 +466,13 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(404).json({ message: 'No account found for that username or email' });
     }
 
+    // Blocked / deactivated cannot reset password. Soft-deleted accounts may continue
+    // (same identity can re-register or complete reset before reclaim).
+    if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
+      const lifecycle = accountLifecycleBlock(user);
+      return res.status(403).json(lifecycle);
+    }
+
     const resetToken = signResetToken(user);
     return res.json({
       message: 'Identity verified. You can set a new password.',
@@ -451,6 +483,95 @@ router.post('/forgot-password', async (req, res) => {
   } catch (error) {
     console.error('Forgot password error:', error);
     return res.status(500).json({ message: 'Unable to verify account' });
+  }
+});
+
+router.get('/support-info', (_req, res) => {
+  return res.json({
+    supportEmail: getSupportEmail(),
+    contactPath: '/auth/contact-admin'
+  });
+});
+
+/**
+ * Public — blocked/deactivated users ask staff to restore access.
+ * One open request per user; notifies managers + Super Admins.
+ */
+router.post('/contact-admin', async (req, res) => {
+  try {
+    const identifier = String(req.body.identifier || req.body.email || req.body.username || '').trim();
+    const message = String(req.body.message || '').trim().slice(0, 600);
+
+    if (!identifier || identifier.length < 3) {
+      return res.status(400).json({ message: 'Enter the username or email on your account' });
+    }
+
+    const user = await findByIdentifier(identifier);
+    if (!user) {
+      return res.status(404).json({
+        message: 'No account found for that username or email.',
+        supportEmail: getSupportEmail()
+      });
+    }
+    await hydrateUser(user);
+
+    if (user.accountStatus !== 'blocked' && user.accountStatus !== 'deactivated') {
+      return res.status(400).json({
+        message:
+          'Contact administrator is only for blocked or deactivated accounts. If you need a login unlock, use Sign in → unlock request instead.',
+        supportEmail: getSupportEmail()
+      });
+    }
+
+    const existing = await ContactAdminRequest.findOne({ user: user._id, status: 'open' });
+    if (existing) {
+      return res.status(409).json({
+        code: 'CONTACT_DUPLICATE',
+        message:
+          'You already have an open contact request. The team has been notified — please wait for a response instead of sending another.',
+        supportEmail: getSupportEmail()
+      });
+    }
+
+    await ContactAdminRequest.create({
+      user: user._id,
+      identifier,
+      email: user.email || '',
+      username: user.username || '',
+      accountStatus: user.accountStatus,
+      role: user.role || 'customer',
+      message,
+      status: 'open'
+    });
+
+    const note = message ? ` Note: ${message}` : '';
+    const title = 'Account restore request';
+    const body = `${user.fullName} (@${user.username || user.email}) · ${user.accountStatus} · ${
+      user.role || 'customer'
+    } asked to restore portal access.${note}`;
+    const href = user.role === 'customer' || !user.role ? '/admin/customers' : '/admin/staff';
+
+    await Promise.allSettled([
+      notifyManagers('security', title, body, href),
+      notifySuperAdmins('security', title, body, href)
+    ]);
+
+    return res.json({
+      message:
+        'Your request was sent to NovaBank administrators. You will hear back after they review your account. Duplicate requests are not allowed while one is open.',
+      supportEmail: getSupportEmail()
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        code: 'CONTACT_DUPLICATE',
+        message:
+          'You already have an open contact request. The team has been notified — please wait for a response instead of sending another.',
+        supportEmail: getSupportEmail()
+      });
+    }
+    console.error('Contact admin error:', error);
+    return res.status(500).json({ message: 'Unable to send contact request' });
   }
 });
 
@@ -532,6 +653,10 @@ router.post('/reset-password', async (req, res) => {
     const user = await User.findById(payload.sub);
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
+    }
+
+    if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
+      return res.status(403).json(accountLifecycleBlock(user));
     }
 
     user.password = password;
