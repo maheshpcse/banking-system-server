@@ -37,6 +37,9 @@ const billSchema = new mongoose.Schema(
       default: null
     },
     paidAt: { type: Date, default: null },
+    paymentExpiresAt: { type: Date, default: null },
+    statusReason: { type: String, trim: true, maxlength: 240, default: '' },
+    rewardsAwarded: { type: Boolean, default: false },
     ratedAt: { type: Date, default: null },
     notes: { type: String, trim: true, maxlength: 400, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
@@ -68,6 +71,9 @@ billSchema.methods.toSafeJSON = function toSafeJSON() {
     paymentStatus: this.paymentStatus,
     paymentMethod: this.paymentMethod,
     paidAt: this.paidAt ? this.paidAt.toISOString?.() || this.paidAt : null,
+    paymentExpiresAt: this.paymentExpiresAt ? this.paymentExpiresAt.toISOString?.() || this.paymentExpiresAt : null,
+    statusReason: this.statusReason || '',
+    rewardsAwarded: !!this.rewardsAwarded,
     ratedAt: this.ratedAt ? this.ratedAt.toISOString?.() || this.ratedAt : null,
     notes: this.notes || '',
     createdAt: this.createdAt?.toISOString?.() || this.createdAt,
