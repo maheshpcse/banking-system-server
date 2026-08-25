@@ -1,14 +1,12 @@
 const express = require('express');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
-const Notification = require('../models/Notification');
-const { notifyUser } = require('../services/notify-channels');
+const { notifyUser, notifyContact } = require('../services/notify-channels');
 const { generateAccountNumber } = require('../utils/helpers');
 const {
   hydrateUser,
   hydrateUsers,
   accountNumberExists,
-  deleteUserDomain,
   writeAudit
 } = require('../services/user-domain');
 
@@ -183,12 +181,26 @@ router.patch('/customers/:id/status', async (req, res) => {
       meta: { status }
     });
 
-    await notifyUser(user._id, {
+    let title = 'Account status updated';
+    let body = `Your NovaBank account status is now ${status.replace(/_/g, ' ')}.`;
+    if (status === 'blocked') {
+      title = 'Account blocked';
+      body =
+        'Your NovaBank account has been blocked by staff. You cannot sign in until a staff member restores access. Please contact NovaBank support if you need help.';
+    } else if (status === 'deactivated') {
+      title = 'Account deactivated';
+      body =
+        'Your NovaBank account has been deactivated by staff. You cannot sign in until a staff member reactivates your account. Please contact NovaBank support if you need help.';
+    } else if (status === 'active') {
+      title = 'Account restored';
+      body = 'Your NovaBank account is active again. You can sign in and use banking features as usual.';
+    }
+
+    await notifyContact(user, {
       kind: 'admin',
-      title: 'Account status updated',
-      body: `Your NovaBank account is now ${status.replace(/_/g, ' ')}.`,
-      href: '/settings?tab=banking',
-      forceEmail: true
+      title,
+      body,
+      href: '/settings?tab=banking'
     });
 
     return res.json({ message: `Status updated to ${status}`, user: user.toSafeJSON() });
@@ -236,16 +248,32 @@ router.delete('/customers/:id', async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'Customer not found' });
     }
-    await Notification.deleteMany({ user: user._id });
-    await deleteUserDomain(user._id);
+    if (user.isSuperAdmin) {
+      return res.status(403).json({ message: 'Cannot delete the Super Admin account' });
+    }
+    if (user.accountStatus === 'deleted') {
+      return res.json({ message: 'Customer already deleted', user: user.toSafeJSON() });
+    }
+
+    await notifyContact(user, {
+      kind: 'admin',
+      title: 'Account deleted',
+      body:
+        'Your NovaBank account was deleted by staff. You can no longer sign in with these credentials. To use NovaBank again, please create a new account with the same email or username.',
+      href: '/auth/register'
+    }).catch(() => null);
+
+    user.accountStatus = 'deleted';
+    await user.save();
+
     await writeAudit({
       actorId: req.user._id,
       targetUserId: user._id,
-      action: 'customer.delete',
+      action: 'customer.soft_delete',
       meta: { email: user.email, username: user.username }
     });
-    await user.deleteOne();
-    return res.json({ message: 'Customer removed' });
+
+    return res.json({ message: 'Customer account deleted', user: user.toSafeJSON() });
   } catch (error) {
     console.error('Admin delete customer error:', error);
     return res.status(500).json({ message: 'Unable to delete customer' });
@@ -438,6 +466,105 @@ router.post('/staff/:userId/reject', requireSuperAdmin, async (req, res) => {
   } catch (error) {
     console.error('Staff reject error:', error);
     return res.status(500).json({ message: 'Unable to reject staff user' });
+  }
+});
+
+router.patch('/staff/:userId/status', requireSuperAdmin, async (req, res) => {
+  try {
+    const status = String(req.body.status || '').trim();
+    const allowed = ['blocked', 'deactivated', 'active'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: 'Invalid staff account status' });
+    }
+
+    const user = await User.findById(req.params.userId);
+    if (!user || !['manager', 'admin'].includes(user.role || '')) {
+      return res.status(404).json({ message: 'Staff user not found' });
+    }
+    if (user.isSuperAdmin) {
+      return res.status(403).json({ message: 'Cannot change Super Admin account status' });
+    }
+    if (String(user._id) === String(req.user._id)) {
+      return res.status(400).json({ message: 'You cannot change your own account status' });
+    }
+
+    user.accountStatus = status;
+    await user.save();
+
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'staff.status_update',
+      meta: { status, role: user.role }
+    });
+
+    let title = 'Staff account status updated';
+    let body = `Your NovaBank staff account is now ${status}.`;
+    if (status === 'blocked') {
+      title = 'Staff account blocked';
+      body =
+        'Your NovaBank staff account has been blocked by a Super Admin. You cannot sign in until access is restored. Contact your Super Admin for help.';
+    } else if (status === 'deactivated') {
+      title = 'Staff account deactivated';
+      body =
+        'Your NovaBank staff account has been deactivated by a Super Admin. You cannot sign in until access is restored. Contact your Super Admin for help.';
+    } else if (status === 'active') {
+      title = 'Staff account restored';
+      body = 'Your NovaBank staff account is active again. You can sign in to the staff portal.';
+    }
+
+    await notifyContact(user, {
+      kind: 'admin',
+      title,
+      body,
+      href: '/auth/login'
+    });
+
+    return res.json({ message: `Staff status updated to ${status}`, user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Staff status error:', error);
+    return res.status(500).json({ message: 'Unable to update staff status' });
+  }
+});
+
+router.delete('/staff/:userId', requireSuperAdmin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user || !['manager', 'admin'].includes(user.role || '')) {
+      return res.status(404).json({ message: 'Staff user not found' });
+    }
+    if (user.isSuperAdmin) {
+      return res.status(403).json({ message: 'Cannot delete the Super Admin account' });
+    }
+    if (String(user._id) === String(req.user._id)) {
+      return res.status(400).json({ message: 'You cannot delete your own account' });
+    }
+    if (user.accountStatus === 'deleted') {
+      return res.json({ message: 'Staff account already deleted', user: user.toSafeJSON() });
+    }
+
+    await notifyContact(user, {
+      kind: 'admin',
+      title: 'Staff account deleted',
+      body:
+        'Your NovaBank staff account was deleted by a Super Admin. You can no longer sign in. To request access again, register a new staff account with the same email or username.',
+      href: '/auth/register-staff'
+    }).catch(() => null);
+
+    user.accountStatus = 'deleted';
+    await user.save();
+
+    await writeAudit({
+      actorId: req.user._id,
+      targetUserId: user._id,
+      action: 'staff.soft_delete',
+      meta: { email: user.email, username: user.username, role: user.role }
+    });
+
+    return res.json({ message: 'Staff account deleted', user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Staff delete error:', error);
+    return res.status(500).json({ message: 'Unable to delete staff account' });
   }
 });
 

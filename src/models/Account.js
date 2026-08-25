@@ -29,7 +29,8 @@ const accountSchema = new mongoose.Schema(
         'active',
         'rejected',
         'blocked',
-        'deactivated'
+        'deactivated',
+        'deleted'
       ],
       default: 'address_required',
       index: true
