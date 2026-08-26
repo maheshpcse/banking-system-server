@@ -156,6 +156,189 @@ async function expireCouponsNow() {
   );
 }
 
+/* ---------- Sales target reports (paid bills) ---------- */
+
+function resolveSalesDateRange(query) {
+  const preset = String(query.range || query.preset || 'last_month')
+    .trim()
+    .toLowerCase();
+  const cadenceRaw = String(query.cadence || 'weekly')
+    .trim()
+    .toLowerCase();
+  const cadence = ['daily', 'weekly', 'biweekly', 'monthly'].includes(cadenceRaw)
+    ? cadenceRaw
+    : 'weekly';
+
+  const now = new Date();
+  let to = new Date(now);
+  to.setHours(23, 59, 59, 999);
+  let from = new Date(now);
+  from.setHours(0, 0, 0, 0);
+
+  const daySpans = {
+    last_week: 7,
+    last_month: 30,
+    last_3_months: 90,
+    last_6_months: 180,
+    last_year: 365
+  };
+
+  if (preset === 'custom') {
+    const fromRaw = String(query.from || '').trim();
+    const toRaw = String(query.to || '').trim();
+    if (fromRaw) {
+      from = new Date(fromRaw);
+      from.setHours(0, 0, 0, 0);
+    } else {
+      from.setDate(from.getDate() - 29);
+    }
+    if (toRaw) {
+      to = new Date(toRaw);
+      to.setHours(23, 59, 59, 999);
+    }
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      from = new Date(now);
+      from.setHours(0, 0, 0, 0);
+      from.setDate(from.getDate() - 29);
+      to = new Date(now);
+      to.setHours(23, 59, 59, 999);
+    }
+  } else {
+    const days = daySpans[preset] || daySpans.last_month;
+    from.setDate(from.getDate() - (days - 1));
+  }
+
+  return { cadence, range: preset === 'custom' ? 'custom' : preset in daySpans ? preset : 'last_month', from, to };
+}
+
+function paidBillDateMatch(from, to) {
+  return {
+    paymentStatus: 'paid',
+    $or: [
+      { paidAt: { $gte: from, $lte: to } },
+      {
+        $and: [
+          { $or: [{ paidAt: null }, { paidAt: { $exists: false } }] },
+          { createdAt: { $gte: from, $lte: to } }
+        ]
+      }
+    ]
+  };
+}
+
+router.get('/sales-reports', async (req, res) => {
+  try {
+    const { cadence, range, from, to } = resolveSalesDateRange(req.query || {});
+    const match = paidBillDateMatch(from, to);
+
+    const [productSales, customerPurchases, totalsAgg] = await Promise.all([
+      Bill.aggregate([
+        { $match: match },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: {
+              productId: '$items.product',
+              name: '$items.name'
+            },
+            qty: { $sum: '$items.quantity' },
+            revenue: { $sum: '$items.lineTotal' },
+            orders: { $addToSet: '$_id' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            productId: { $toString: '$_id.productId' },
+            name: '$_id.name',
+            qty: 1,
+            revenue: 1,
+            orderCount: { $size: '$orders' }
+          }
+        },
+        { $sort: { revenue: -1, name: 1 } }
+      ]),
+      Bill.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            itemQty: { $sum: '$items.quantity' }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              customerId: '$customer',
+              name: '$customerName'
+            },
+            qty: { $sum: '$itemQty' },
+            revenue: { $sum: '$grandTotal' },
+            orderCount: { $sum: 1 }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            customerId: { $toString: '$_id.customerId' },
+            name: '$_id.name',
+            qty: 1,
+            revenue: 1,
+            orderCount: 1
+          }
+        },
+        { $sort: { revenue: -1, name: 1 } }
+      ]),
+      Bill.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            itemQty: { $sum: '$items.quantity' }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: '$grandTotal' },
+            qty: { $sum: '$itemQty' },
+            orderCount: { $sum: 1 }
+          }
+        }
+      ])
+    ]);
+
+    const totalsRow = totalsAgg[0] || { revenue: 0, qty: 0, orderCount: 0 };
+
+    return res.json({
+      cadence,
+      range,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      productSales: productSales.map((row) => ({
+        name: row.name,
+        qty: row.qty || 0,
+        revenue: money(row.revenue),
+        orderCount: row.orderCount || 0,
+        productId: row.productId || null
+      })),
+      customerPurchases: customerPurchases.map((row) => ({
+        name: row.name,
+        qty: row.qty || 0,
+        revenue: money(row.revenue),
+        orderCount: row.orderCount || 0,
+        customerId: row.customerId || null
+      })),
+      totals: {
+        revenue: money(totalsRow.revenue),
+        qty: totalsRow.qty || 0,
+        orderCount: totalsRow.orderCount || 0
+      }
+    });
+  } catch (error) {
+    console.error('Billing sales-reports error:', error);
+    return res.status(500).json({ message: 'Unable to load sales reports' });
+  }
+});
+
 /* ---------- Dashboard ---------- */
 
 router.get('/dashboard/stats', async (_req, res) => {
@@ -400,9 +583,14 @@ router.get('/bills', async (req, res) => {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(50, Math.max(5, Number(req.query.limit) || 12));
     const skip = (page - 1) * limit;
+    const sortField = String(req.query.sort || 'createdAt').trim();
+    const orderRaw = String(req.query.order || 'desc').trim().toLowerCase();
+    const allowedSort = ['createdAt', 'paidAt', 'grandTotal', 'billNumber'];
+    const sortKey = allowedSort.includes(sortField) ? sortField : 'createdAt';
+    const sortDir = orderRaw === 'asc' ? 1 : -1;
     const [total, items] = await Promise.all([
       Bill.countDocuments(filter),
-      Bill.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)
+      Bill.find(filter).sort({ [sortKey]: sortDir }).skip(skip).limit(limit)
     ]);
 
     return res.json({
@@ -576,6 +764,57 @@ router.post('/bills/:id/await-payment', requireBillingOperator, async (req, res)
   }
 });
 
+async function restoreBillStock(bill) {
+  for (const item of bill.items || []) {
+    const productId = item.product?.toString?.() || String(item.product || '');
+    if (!productId) {
+      continue;
+    }
+    const product = await BillingProduct.findById(productId);
+    if (product) {
+      product.stock = Math.max(0, Number(product.stock || 0) + Math.max(0, Number(item.quantity) || 0));
+      await product.save();
+    }
+  }
+}
+
+/** Soft-cancel a pending bill: mark failed, restore stock, keep the invoice in history. */
+router.patch('/bills/:id/cancel', requireBillingOperator, async (req, res) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      return res.status(404).json({ message: 'Bill not found' });
+    }
+    if (bill.paymentStatus !== 'pending') {
+      return res.status(400).json({ message: 'Only payment-pending invoices can be cancelled' });
+    }
+    const statusReason = String(req.body?.statusReason || '').trim();
+    if (!statusReason) {
+      return res.status(400).json({ message: 'statusReason is required' });
+    }
+
+    await restoreBillStock(bill);
+    await Payment.deleteMany({ bill: bill._id });
+
+    bill.paymentStatus = 'failed';
+    bill.statusReason = statusReason.slice(0, 240);
+    bill.paymentExpiresAt = null;
+    await bill.save();
+
+    await notifyManagers(
+      'billing',
+      'Invoice cancelled',
+      `${bill.billNumber} · ${bill.customerName} · $${Number(bill.grandTotal || 0).toFixed(2)} · ${bill.statusReason}`,
+      '/notifications'
+    );
+
+    return res.json({ message: 'Bill cancelled', bill: bill.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing bill cancel error:', error);
+    return res.status(500).json({ message: 'Unable to cancel bill' });
+  }
+});
+
 router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
   try {
     const bill = await Bill.findById(req.params.id);
@@ -599,17 +838,14 @@ router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
       });
     }
 
-    for (const item of bill.items || []) {
-      const productId = item.product?.toString?.() || String(item.product || '');
-      if (!productId) {
-        continue;
-      }
-      const product = await BillingProduct.findById(productId);
-      if (product) {
-        product.stock = Math.max(0, Number(product.stock || 0) + Math.max(0, Number(item.quantity) || 0));
-        await product.save();
-      }
+    const statusReason = String(req.body?.statusReason || req.query?.statusReason || '').trim();
+    if (statusReason) {
+      bill.statusReason = statusReason.slice(0, 240);
+    } else if (!String(bill.statusReason || '').trim()) {
+      bill.statusReason = 'Deleted by staff before settlement.';
     }
+
+    await restoreBillStock(bill);
 
     await Payment.deleteMany({ bill: bill._id });
     await bill.deleteOne();
@@ -617,7 +853,8 @@ router.delete('/bills/:id', requireBillingOperator, async (req, res) => {
     await notifyManagers(
       'billing',
       'Invoice deleted',
-      `${bill.billNumber} · ${bill.customerName} · $${Number(bill.grandTotal || 0).toFixed(2)} removed`,
+      `${bill.billNumber} · ${bill.customerName} · $${Number(bill.grandTotal || 0).toFixed(2)} removed` +
+        (bill.statusReason ? ` · ${bill.statusReason}` : ''),
       '/notifications'
     );
 

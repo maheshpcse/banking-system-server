@@ -30,6 +30,18 @@ router.get('/customers', async (req, res) => {
     const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '5'), 10) || 5));
     const scope = String(req.query.scope || '').toLowerCase();
     const roleFilter = String(req.query.role || '').toLowerCase();
+    const statusFilter = String(req.query.status || '').trim().toLowerCase();
+    const allowedStatus = [
+      'pending',
+      'address_required',
+      'under_review',
+      'approved',
+      'active',
+      'rejected',
+      'blocked',
+      'deactivated',
+      'deleted'
+    ];
 
     // Super Admin can list all roles except the Super Admin seed account itself.
     let filter;
@@ -41,6 +53,14 @@ router.get('/customers', async (req, res) => {
       filter = {
         $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }]
       };
+    }
+
+    if (statusFilter && statusFilter !== 'all' && allowedStatus.includes(statusFilter)) {
+      if (statusFilter === 'active') {
+        filter = { ...filter, accountStatus: { $in: ['active', 'approved'] } };
+      } else {
+        filter = { ...filter, accountStatus: statusFilter };
+      }
     }
 
     const total = await User.countDocuments(filter);
