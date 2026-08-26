@@ -16,6 +16,10 @@ function moneyGate(user, { channel = 'online' } = {}) {
     return 'Account number is required before this action. Complete account opening first.';
   }
   if (user.accountStatus && !['active', 'approved'].includes(user.accountStatus)) {
+    const status = String(user.accountStatus);
+    if (status === 'blocked' || status === 'suspended' || status === 'deactivated') {
+      return `Your banking account is ${status}. You can still sign in — contact administrator to restore banking access.`;
+    }
     return 'Account is not active for money movement.';
   }
   const currency = String(user.settings?.currency || '').trim().toUpperCase();

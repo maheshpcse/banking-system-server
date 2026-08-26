@@ -6,6 +6,9 @@ const contactAdminRequestSchema = new mongoose.Schema(
     identifier: { type: String, required: true, trim: true },
     email: { type: String, trim: true, lowercase: true, default: '' },
     username: { type: String, trim: true, lowercase: true, default: '' },
+    /** Portal / sign-in status snapshot at request time */
+    loginStatus: { type: String, trim: true, default: '' },
+    /** Banking / ledger status snapshot at request time */
     accountStatus: { type: String, trim: true, default: '' },
     role: { type: String, trim: true, default: 'customer' },
     message: { type: String, trim: true, maxlength: 600, default: '' },

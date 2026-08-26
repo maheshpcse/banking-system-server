@@ -88,6 +88,20 @@ const userSchema = new mongoose.Schema(
       enum: ['active', 'pending_approval', 'rejected'],
       default: 'active'
     },
+    /**
+     * Portal / sign-in access. Independent of banking ledger KYC status.
+     * blocked | deactivated | deleted prevent login; active allows sign-in.
+     */
+    loginStatus: {
+      type: String,
+      enum: ['active', 'blocked', 'deactivated', 'deleted'],
+      default: 'active',
+      index: true
+    },
+    /**
+     * Banking / ledger / KYC status (dual-written to Account collection).
+     * suspended = banking freeze while the user may still sign in.
+     */
     accountStatus: {
       type: String,
       enum: [
@@ -98,6 +112,7 @@ const userSchema = new mongoose.Schema(
         'active',
         'rejected',
         'blocked',
+        'suspended',
         'deactivated',
         'deleted'
       ],
@@ -292,7 +307,10 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     role: this.role || 'customer',
     isSuperAdmin: !!this.isSuperAdmin,
     staffStatus: this.staffStatus || 'active',
+    loginStatus: this.loginStatus || 'active',
     accountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
+    /** Explicit alias — same value as accountStatus (banking/ledger/KYC). */
+    bankingAccountStatus: this.accountStatus || (this.accountNumber ? 'active' : 'address_required'),
     address: this.address || null,
     loginAttempts: {
       count: this.loginAttempts?.count || 0,

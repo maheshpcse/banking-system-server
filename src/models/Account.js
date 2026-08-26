@@ -29,6 +29,7 @@ const accountSchema = new mongoose.Schema(
         'active',
         'rejected',
         'blocked',
+        'suspended',
         'deactivated',
         'deleted'
       ],

@@ -61,8 +61,19 @@ async function findByIdentifier(identifier) {
   return User.findOne({ username: normalizeUsername(raw) });
 }
 
+function effectiveLoginStatus(user) {
+  if (user?.loginStatus != null && String(user.loginStatus).trim() !== '') {
+    return String(user.loginStatus).trim();
+  }
+  const banking = String(user?.accountStatus || '').trim();
+  if (banking === 'blocked' || banking === 'deactivated' || banking === 'deleted') {
+    return banking;
+  }
+  return 'active';
+}
+
 function accountLifecycleBlock(user, context = 'login') {
-  const status = user.accountStatus || '';
+  const status = effectiveLoginStatus(user);
   const support = getSupportEmail();
   if (status === 'blocked') {
     if (context === 'forgot') {
@@ -110,25 +121,34 @@ function accountLifecycleBlock(user, context = 'login') {
   return null;
 }
 
+function isSoftDeleted(user) {
+  return effectiveLoginStatus(user) === 'deleted' || user.accountStatus === 'deleted';
+}
+
+function loginRestrictedForSignup(user) {
+  const status = effectiveLoginStatus(user);
+  return status === 'blocked' || status === 'deactivated';
+}
+
 /**
  * Reclaim a soft-deleted user for register / register-staff, or report 409 conflicts.
  * Prefer email match; free username on a different deleted user when needed.
- * Blocked/deactivated accounts cannot be reclaimed — return lifecycle instead.
+ * Blocked/deactivated loginStatus cannot be reclaimed — return lifecycle instead.
  */
 async function resolveDeletedReclaim(cleanEmail, cleanUsername) {
   const byEmail = await User.findOne({ email: cleanEmail });
   const byUsername = await User.findOne({ username: cleanUsername });
 
-  if (byEmail && byEmail.accountStatus !== 'deleted') {
+  if (byEmail && !isSoftDeleted(byEmail)) {
     const lifecycle = accountLifecycleBlock(byEmail, 'signup');
-    if (lifecycle && (byEmail.accountStatus === 'blocked' || byEmail.accountStatus === 'deactivated')) {
+    if (lifecycle && loginRestrictedForSignup(byEmail)) {
       return { lifecycle };
     }
     return { conflict: 'email' };
   }
-  if (byUsername && byUsername.accountStatus !== 'deleted') {
+  if (byUsername && !isSoftDeleted(byUsername)) {
     const lifecycle = accountLifecycleBlock(byUsername, 'signup');
-    if (lifecycle && (byUsername.accountStatus === 'blocked' || byUsername.accountStatus === 'deactivated')) {
+    if (lifecycle && loginRestrictedForSignup(byUsername)) {
       return { lifecycle };
     }
     return { conflict: 'username' };
@@ -214,6 +234,7 @@ router.post('/register', async (req, res) => {
       user.username = cleanUsername;
       user.email = cleanEmail;
       user.password = password;
+      user.loginStatus = 'active';
       user.accountStatus = 'address_required';
       user.role = 'customer';
       user.staffStatus = 'active';
@@ -234,6 +255,7 @@ router.post('/register', async (req, res) => {
       email: cleanEmail,
       password,
       accountNumber: null,
+      loginStatus: 'active',
       accountStatus: 'address_required',
       role: 'customer',
       staffStatus: 'active',
@@ -309,6 +331,7 @@ router.post('/register-staff', async (req, res) => {
       user.role = cleanRole;
       user.isSuperAdmin = false;
       user.staffStatus = 'pending_approval';
+      user.loginStatus = 'active';
       user.accountStatus = 'active';
       user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
       user.avatar = { ...(user.avatar?.toObject?.() || user.avatar || {}), ...avatar };
@@ -323,6 +346,7 @@ router.post('/register-staff', async (req, res) => {
         isSuperAdmin: false,
         staffStatus: 'pending_approval',
         accountNumber: null,
+        loginStatus: 'active',
         accountStatus: 'active',
         balance: 0,
         avatar
@@ -502,9 +526,10 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(404).json({ message: 'No account found for that username or email' });
     }
 
-    // Blocked / deactivated cannot reset password. Soft-deleted accounts may continue
+    // Blocked / deactivated loginStatus cannot reset password. Soft-deleted accounts may continue
     // (same identity can re-register or complete reset before reclaim).
-    if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
+    const loginStatus = effectiveLoginStatus(user);
+    if (loginStatus === 'blocked' || loginStatus === 'deactivated') {
       const lifecycle = accountLifecycleBlock(user, 'forgot');
       return res.status(403).json(lifecycle);
     }
@@ -530,8 +555,8 @@ router.get('/support-info', (_req, res) => {
 });
 
 /**
- * Public — blocked/deactivated users ask staff to restore access.
- * One open request per user; notifies managers + Super Admins.
+ * Public — blocked/deactivated login OR blocked/suspended/deactivated banking
+ * users ask staff to restore access. One open request per user; notifies managers + Super Admins.
  */
 router.post('/contact-admin', async (req, res) => {
   try {
@@ -551,10 +576,18 @@ router.post('/contact-admin', async (req, res) => {
     }
     await hydrateUser(user);
 
-    if (user.accountStatus !== 'blocked' && user.accountStatus !== 'deactivated') {
+    const loginStatus = effectiveLoginStatus(user);
+    const bankingStatus = user.accountStatus || '';
+    const loginNeedsHelp = loginStatus === 'blocked' || loginStatus === 'deactivated';
+    const bankingNeedsHelp =
+      bankingStatus === 'blocked' ||
+      bankingStatus === 'suspended' ||
+      bankingStatus === 'deactivated';
+
+    if (!loginNeedsHelp && !bankingNeedsHelp) {
       return res.status(400).json({
         message:
-          'Contact administrator is only for blocked or deactivated accounts. If you need a login unlock, use Sign in → unlock request instead.',
+          'Contact administrator is only for blocked or deactivated sign-in access, or blocked, suspended, or deactivated banking access. If you need a login unlock, use Sign in → unlock request instead.',
         supportEmail: getSupportEmail()
       });
     }
@@ -574,7 +607,8 @@ router.post('/contact-admin', async (req, res) => {
       identifier,
       email: user.email || '',
       username: user.username || '',
-      accountStatus: user.accountStatus,
+      loginStatus,
+      accountStatus: bankingStatus,
       role: user.role || 'customer',
       message,
       status: 'open'
@@ -582,9 +616,9 @@ router.post('/contact-admin', async (req, res) => {
 
     const note = message ? ` Note: ${message}` : '';
     const title = 'Account restore request';
-    const body = `${user.fullName} (@${user.username || user.email}) · ${user.accountStatus} · ${
+    const body = `${user.fullName} (@${user.username || user.email}) · login:${loginStatus} · banking:${bankingStatus} · ${
       user.role || 'customer'
-    } asked to restore portal access.${note}`;
+    } asked to restore access.${note}`;
     const href = user.role === 'customer' || !user.role ? '/admin/customers' : '/admin/staff';
 
     await Promise.allSettled([
@@ -691,7 +725,7 @@ router.post('/reset-password', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
-    if (user.accountStatus === 'blocked' || user.accountStatus === 'deactivated') {
+    if (effectiveLoginStatus(user) === 'blocked' || effectiveLoginStatus(user) === 'deactivated') {
       return res.status(403).json(accountLifecycleBlock(user, 'forgot'));
     }
 
