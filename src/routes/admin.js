@@ -31,7 +31,13 @@ router.get('/customers', async (req, res) => {
     const scope = String(req.query.scope || '').toLowerCase();
     const roleFilter = String(req.query.role || '').toLowerCase();
     const statusFilter = String(req.query.status || '').trim().toLowerCase();
-    const allowedStatus = [
+    const loginStatusFilter = String(req.query.loginStatus || '').trim().toLowerCase();
+    const bankingStatusFilter = String(
+      req.query.bankingStatus || req.query.accountStatus || ''
+    )
+      .trim()
+      .toLowerCase();
+    const allowedBankingStatus = [
       'pending',
       'address_required',
       'under_review',
@@ -39,9 +45,11 @@ router.get('/customers', async (req, res) => {
       'active',
       'rejected',
       'blocked',
+      'suspended',
       'deactivated',
       'deleted'
     ];
+    const allowedLoginStatus = ['active', 'blocked', 'deactivated', 'deleted'];
 
     // Super Admin can list all roles except the Super Admin seed account itself.
     let filter;
@@ -55,7 +63,22 @@ router.get('/customers', async (req, res) => {
       };
     }
 
-    if (statusFilter && statusFilter !== 'all' && allowedStatus.includes(statusFilter)) {
+    if (loginStatusFilter && loginStatusFilter !== 'all' && allowedLoginStatus.includes(loginStatusFilter)) {
+      filter = { ...filter, loginStatus: loginStatusFilter };
+    }
+
+    if (
+      bankingStatusFilter &&
+      bankingStatusFilter !== 'all' &&
+      allowedBankingStatus.includes(bankingStatusFilter)
+    ) {
+      if (bankingStatusFilter === 'active') {
+        filter = { ...filter, accountStatus: { $in: ['active', 'approved'] } };
+      } else {
+        filter = { ...filter, accountStatus: bankingStatusFilter };
+      }
+    } else if (statusFilter && statusFilter !== 'all' && allowedBankingStatus.includes(statusFilter)) {
+      // Legacy `status` query — treat as banking/accountStatus for backward compat
       if (statusFilter === 'active') {
         filter = { ...filter, accountStatus: { $in: ['active', 'approved'] } };
       } else {
@@ -151,7 +174,16 @@ router.get('/requests', async (req, res) => {
       filter.accountStatus = status;
     } else {
       filter.accountStatus = {
-        $in: ['under_review', 'active', 'approved', 'rejected', 'address_required', 'blocked', 'deactivated']
+        $in: [
+          'under_review',
+          'active',
+          'approved',
+          'rejected',
+          'address_required',
+          'blocked',
+          'suspended',
+          'deactivated'
+        ]
       };
     }
     const users = await User.find(filter).sort({ updatedAt: -1 }).limit(150);
@@ -177,12 +209,87 @@ router.get('/requests', async (req, res) => {
   }
 });
 
-router.patch('/customers/:id/status', async (req, res) => {
+async function applyLoginStatus(user, status, actorId) {
+  user.loginStatus = status;
+  await user.save();
+
+  await writeAudit({
+    actorId,
+    targetUserId: user._id,
+    action: 'account.login_status_update',
+    meta: { status }
+  });
+
+  let title = 'Sign-in access updated';
+  let body = `Your NovaBank sign-in access is now ${status}.`;
+  if (status === 'blocked') {
+    title = 'Sign-in blocked';
+    body =
+      'Your NovaBank sign-in access has been blocked by staff. You cannot sign in until a staff member restores access. Use Contact administrator (/auth/contact-admin) or contact NovaBank support if you need help.';
+  } else if (status === 'deactivated') {
+    title = 'Sign-in deactivated';
+    body =
+      'Your NovaBank sign-in access has been deactivated by staff. You cannot sign in until a staff member reactivates your account. Use Contact administrator (/auth/contact-admin) or contact NovaBank support if you need help.';
+  } else if (status === 'active') {
+    title = 'Sign-in restored';
+    body = 'Your NovaBank sign-in access is active again. You can sign in at /auth/login.';
+  }
+
+  await notifyAccountContact(user, {
+    kind: 'admin',
+    title,
+    body,
+    href: status === 'active' ? '/auth/login' : '/auth/contact-admin'
+  });
+}
+
+async function applyBankingStatus(user, status, actorId) {
+  user.accountStatus = status;
+  await user.save();
+
+  await writeAudit({
+    actorId,
+    targetUserId: user._id,
+    action: 'account.banking_status_update',
+    meta: { status }
+  });
+
+  const loginActive = (user.loginStatus || 'active') === 'active';
+  const stillSignInHint = loginActive
+    ? ' You can still sign in. Use Contact administrator (/auth/contact-admin) to request banking access restoration.'
+    : ' Use Contact administrator (/auth/contact-admin) if you need help.';
+
+  let title = 'Banking status updated';
+  let body = `Your NovaBank banking account status is now ${status.replace(/_/g, ' ')}.`;
+  if (status === 'blocked') {
+    title = 'Banking account blocked';
+    body = `Your NovaBank banking account has been blocked by staff. Transfers and other money movement are unavailable.${stillSignInHint}`;
+  } else if (status === 'suspended') {
+    title = 'Banking account suspended';
+    body = `Your NovaBank banking account has been suspended by staff. Transfers and other money movement are unavailable.${stillSignInHint}`;
+  } else if (status === 'deactivated') {
+    title = 'Banking account deactivated';
+    body = `Your NovaBank banking account has been deactivated by staff. Transfers and other money movement are unavailable.${stillSignInHint}`;
+  } else if (status === 'active') {
+    title = 'Banking account restored';
+    body =
+      'Your NovaBank banking account is active again. You can use deposits, withdrawals, and transfers as usual.';
+  }
+
+  await notifyAccountContact(user, {
+    kind: 'admin',
+    title,
+    body,
+    href: '/settings?tab=banking'
+  });
+}
+
+router.patch('/customers/:id/login-status', async (req, res) => {
   try {
     const status = String(req.body.status || '').trim();
-    const allowed = ['active', 'blocked', 'deactivated', 'under_review', 'rejected', 'address_required'];
+    const allowed = ['active', 'blocked', 'deactivated'];
     if (!allowed.includes(status)) {
-      return res.status(400).json({ message: 'Invalid account status' });
+      return res.status(400).json({ message: 'Invalid login status' });
     }
 
     const user = await User.findById(req.params.id);
@@ -191,39 +298,103 @@ router.patch('/customers/:id/status', async (req, res) => {
     }
     await hydrateUser(user);
 
-    user.accountStatus = status;
-    await user.save();
+    await applyLoginStatus(user, status, req.user._id);
+    return res.json({ message: `Login status updated to ${status}`, user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Admin set login status error:', error);
+    return res.status(500).json({ message: 'Unable to update login status' });
+  }
+});
 
-    await writeAudit({
-      actorId: req.user._id,
-      targetUserId: user._id,
-      action: 'account.status_update',
-      meta: { status }
-    });
-
-    let title = 'Account status updated';
-    let body = `Your NovaBank account status is now ${status.replace(/_/g, ' ')}.`;
-    if (status === 'blocked') {
-      title = 'Account blocked';
-      body =
-        'Your NovaBank account has been blocked by staff. You cannot sign in until a staff member restores access. Please contact NovaBank support if you need help.';
-    } else if (status === 'deactivated') {
-      title = 'Account deactivated';
-      body =
-        'Your NovaBank account has been deactivated by staff. You cannot sign in until a staff member reactivates your account. Please contact NovaBank support if you need help.';
-    } else if (status === 'active') {
-      title = 'Account restored';
-      body = 'Your NovaBank account is active again. You can sign in and use banking features as usual.';
+router.patch('/customers/:id/banking-status', async (req, res) => {
+  try {
+    const status = String(req.body.status || '').trim();
+    const allowed = [
+      'active',
+      'blocked',
+      'suspended',
+      'deactivated',
+      'under_review',
+      'rejected',
+      'address_required'
+    ];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: 'Invalid banking status' });
     }
 
-    await notifyAccountContact(user, {
-      kind: 'admin',
-      title,
-      body,
-      href: '/settings?tab=banking'
-    });
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    await hydrateUser(user);
 
-    return res.json({ message: `Status updated to ${status}`, user: user.toSafeJSON() });
+    await applyBankingStatus(user, status, req.user._id);
+    return res.json({ message: `Banking status updated to ${status}`, user: user.toSafeJSON() });
+  } catch (error) {
+    console.error('Admin set banking status error:', error);
+    return res.status(500).json({ message: 'Unable to update banking status' });
+  }
+});
+
+/**
+ * @deprecated Prefer PATCH /customers/:id/login-status or /banking-status.
+ * If body.axis === 'banking' → banking status; otherwise → login status
+ * (backward compat for old clients that sent blocked|deactivated|active).
+ */
+router.patch('/customers/:id/status', async (req, res) => {
+  try {
+    const status = String(req.body.status || '').trim();
+    const axis = String(req.body.axis || '').trim().toLowerCase();
+
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+    await hydrateUser(user);
+
+    if (axis === 'banking') {
+      const allowed = [
+        'active',
+        'blocked',
+        'suspended',
+        'deactivated',
+        'under_review',
+        'rejected',
+        'address_required'
+      ];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ message: 'Invalid banking status' });
+      }
+      await applyBankingStatus(user, status, req.user._id);
+      return res.json({ message: `Banking status updated to ${status}`, user: user.toSafeJSON() });
+    }
+
+    // Default / no axis: loginStatus (compat for active|blocked|deactivated)
+    const loginAllowed = ['active', 'blocked', 'deactivated'];
+    if (!loginAllowed.includes(status)) {
+      // Older clients sometimes sent under_review / rejected / address_required via this route —
+      // route those to banking when they are not valid login statuses.
+      const bankingAllowed = [
+        'under_review',
+        'rejected',
+        'address_required',
+        'suspended',
+        'blocked',
+        'deactivated',
+        'active'
+      ];
+      if (bankingAllowed.includes(status) && !loginAllowed.includes(status)) {
+        await applyBankingStatus(user, status, req.user._id);
+        return res.json({ message: `Banking status updated to ${status}`, user: user.toSafeJSON() });
+      }
+      return res.status(400).json({
+        message:
+          'Invalid status. Use axis: "login" or "banking", or call /login-status or /banking-status.'
+      });
+    }
+
+    await applyLoginStatus(user, status, req.user._id);
+    return res.json({ message: `Login status updated to ${status}`, user: user.toSafeJSON() });
   } catch (error) {
     console.error('Admin set status error:', error);
     return res.status(500).json({ message: 'Unable to update status' });
@@ -271,7 +442,12 @@ router.delete('/customers/:id', async (req, res) => {
     if (user.isSuperAdmin) {
       return res.status(403).json({ message: 'Cannot delete the Super Admin account' });
     }
-    if (user.accountStatus === 'deleted') {
+    if (user.loginStatus === 'deleted' || user.accountStatus === 'deleted') {
+      if (user.loginStatus !== 'deleted' || user.accountStatus !== 'deleted') {
+        user.loginStatus = 'deleted';
+        user.accountStatus = 'deleted';
+        await user.save();
+      }
       return res.json({ message: 'Customer already deleted', user: user.toSafeJSON() });
     }
 
@@ -283,6 +459,7 @@ router.delete('/customers/:id', async (req, res) => {
       href: '/auth/register'
     }).catch(() => null);
 
+    user.loginStatus = 'deleted';
     user.accountStatus = 'deleted';
     await user.save();
 
@@ -508,14 +685,14 @@ router.patch('/staff/:userId/status', requireSuperAdmin, async (req, res) => {
       return res.status(400).json({ message: 'You cannot change your own account status' });
     }
 
-    user.accountStatus = status;
+    user.loginStatus = status;
     await user.save();
 
     await writeAudit({
       actorId: req.user._id,
       targetUserId: user._id,
       action: 'staff.status_update',
-      meta: { status, role: user.role }
+      meta: { status, role: user.role, axis: 'login' }
     });
 
     let title = 'Staff account status updated';
@@ -559,7 +736,12 @@ router.delete('/staff/:userId', requireSuperAdmin, async (req, res) => {
     if (String(user._id) === String(req.user._id)) {
       return res.status(400).json({ message: 'You cannot delete your own account' });
     }
-    if (user.accountStatus === 'deleted') {
+    if (user.loginStatus === 'deleted' || user.accountStatus === 'deleted') {
+      if (user.loginStatus !== 'deleted' || user.accountStatus !== 'deleted') {
+        user.loginStatus = 'deleted';
+        user.accountStatus = 'deleted';
+        await user.save();
+      }
       return res.json({ message: 'Staff account already deleted', user: user.toSafeJSON() });
     }
 
@@ -571,6 +753,7 @@ router.delete('/staff/:userId', requireSuperAdmin, async (req, res) => {
       href: '/auth/register-staff'
     }).catch(() => null);
 
+    user.loginStatus = 'deleted';
     user.accountStatus = 'deleted';
     await user.save();
 
@@ -705,7 +888,14 @@ router.get('/analytics', async (req, res) => {
       Transaction = require('../models/Transaction');
     } catch {
       return res.json({
-        customers: { total: 0, active: 0, underReview: 0, blocked: 0 },
+        customers: {
+          total: 0,
+          active: 0,
+          underReview: 0,
+          blocked: 0,
+          loginBlocked: 0,
+          bankingBlocked: 0
+        },
         volumeByType: [],
         dailyFlow: []
       });
@@ -713,20 +903,51 @@ router.get('/analytics', async (req, res) => {
 
     const customerFilter = {
       $or: [{ role: 'customer' }, { role: { $exists: false } }, { role: null }],
+      loginStatus: { $ne: 'deleted' },
       accountStatus: { $ne: 'deleted' }
     };
     const staffFilter = {
       role: { $in: ['manager', 'admin'] },
       isSuperAdmin: { $ne: true },
+      loginStatus: { $ne: 'deleted' },
       accountStatus: { $ne: 'deleted' }
     };
-    const [total, active, underReview, blocked, managers, admins, staffPending] = await Promise.all([
+    const [
+      total,
+      active,
+      underReview,
+      blocked,
+      loginBlocked,
+      bankingBlocked,
+      managers,
+      admins,
+      staffPending
+    ] = await Promise.all([
       User.countDocuments(customerFilter),
       User.countDocuments({ ...customerFilter, accountStatus: { $in: ['active', 'approved'] } }),
       User.countDocuments({ ...customerFilter, accountStatus: 'under_review' }),
-      User.countDocuments({ ...customerFilter, accountStatus: { $in: ['blocked', 'deactivated'] } }),
-      User.countDocuments({ role: 'manager', isSuperAdmin: { $ne: true }, accountStatus: { $ne: 'deleted' } }),
-      User.countDocuments({ role: 'admin', isSuperAdmin: { $ne: true }, accountStatus: { $ne: 'deleted' } }),
+      // Legacy field — banking restricted (includes suspended)
+      User.countDocuments({
+        ...customerFilter,
+        accountStatus: { $in: ['blocked', 'suspended', 'deactivated'] }
+      }),
+      User.countDocuments({ ...customerFilter, loginStatus: { $in: ['blocked', 'deactivated'] } }),
+      User.countDocuments({
+        ...customerFilter,
+        accountStatus: { $in: ['blocked', 'suspended', 'deactivated'] }
+      }),
+      User.countDocuments({
+        role: 'manager',
+        isSuperAdmin: { $ne: true },
+        loginStatus: { $ne: 'deleted' },
+        accountStatus: { $ne: 'deleted' }
+      }),
+      User.countDocuments({
+        role: 'admin',
+        isSuperAdmin: { $ne: true },
+        loginStatus: { $ne: 'deleted' },
+        accountStatus: { $ne: 'deleted' }
+      }),
       User.countDocuments({ ...staffFilter, staffStatus: 'pending_approval' })
     ]);
 
@@ -777,7 +998,14 @@ router.get('/analytics', async (req, res) => {
     ]);
 
     return res.json({
-      customers: { total, active, underReview, blocked },
+      customers: {
+        total,
+        active,
+        underReview,
+        blocked,
+        loginBlocked,
+        bankingBlocked
+      },
       staff: { managers, admins, pending: staffPending },
       volumeByType: volumeByType.map((row) => ({
         type: row._id,

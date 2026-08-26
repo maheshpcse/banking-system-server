@@ -16,6 +16,41 @@ const DEFAULT_LIMITS = Object.freeze({
   transferCountDaily: 10
 });
 
+const LOGIN_RESTRICTED = new Set(['blocked', 'deactivated', 'deleted']);
+
+/**
+ * Derive portal loginStatus from historical accountStatus when loginStatus is missing.
+ * Historical blocked|deactivated|deleted were treated as both login + banking restricted.
+ */
+function deriveLoginStatus(accountStatus) {
+  const banking = String(accountStatus || '').trim();
+  if (LOGIN_RESTRICTED.has(banking)) return banking;
+  return 'active';
+}
+
+/**
+ * Ensure user.loginStatus is set in memory; returns true if it was missing/empty
+ * and needs persistence.
+ */
+function ensureLoginStatusInMemory(user) {
+  if (!user) return false;
+  const raw = user.loginStatus;
+  if (raw != null && String(raw).trim() !== '') {
+    return false;
+  }
+  user.loginStatus = deriveLoginStatus(user.accountStatus);
+  return true;
+}
+
+/**
+ * Persist loginStatus via updateOne (avoids post-save dual-write recursion / hydrate loops).
+ */
+async function persistLoginStatusIfNeeded(user) {
+  if (!ensureLoginStatusInMemory(user)) return false;
+  await User.updateOne({ _id: user._id }, { $set: { loginStatus: user.loginStatus } });
+  return true;
+}
+
 function blankControls() {
   return {
     frozen: false,
@@ -156,6 +191,10 @@ async function hydrateUser(user) {
     };
   }
 
+  // Backfill portal loginStatus from historical accountStatus when missing.
+  // Persist carefully with updateOne — does not dual-write loginStatus to Account.
+  await persistLoginStatusIfNeeded(user);
+
   return user;
 }
 
@@ -172,6 +211,10 @@ async function syncUserToDomain(user) {
   if (!user?._id) return;
   const userId = user._id;
 
+  // When saving identity: backfill loginStatus on User if missing (not dual-written to Account).
+  await persistLoginStatusIfNeeded(user);
+
+  // Dual-write banking accountStatus only — never loginStatus (portal-only on User).
   await Account.findOneAndUpdate(
     { user: userId },
     {
@@ -430,6 +473,9 @@ async function deleteUserDomain(userId) {
 
 module.exports = {
   DEFAULT_LIMITS,
+  deriveLoginStatus,
+  ensureLoginStatusInMemory,
+  persistLoginStatusIfNeeded,
   hydrateUser,
   hydrateUsers,
   syncUserToDomain,

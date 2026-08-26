@@ -42,6 +42,7 @@ async function main() {
       isSuperAdmin: role === 'admin',
       staffStatus: 'active',
       accountNumber: null,
+      loginStatus: 'active',
       accountStatus: 'active',
       balance: 0,
       avatar: { style: 'slate', initials: 'NB', image: null }
@@ -50,6 +51,7 @@ async function main() {
   } else {
     user.role = role;
     user.password = password;
+    user.loginStatus = user.loginStatus || 'active';
     user.accountStatus = user.accountStatus || 'active';
     user.staffStatus = 'active';
     if (role === 'admin') {

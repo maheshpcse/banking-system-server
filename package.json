@@ -9,7 +9,8 @@
     "start:raw": "node src/index.js",
     "seed:admin": "node src/config/scripts/seed-admin.js",
     "seed:billing": "node src/config/scripts/seed-billing.js",
-    "migrate:domain": "node scripts/migrate-domain.js"
+    "migrate:domain": "node scripts/migrate-domain.js",
+    "migrate:login-status": "node scripts/migrate-login-status.js"
   },
   "keywords": ["banking", "mean", "express", "mongodb"],
   "author": "",
