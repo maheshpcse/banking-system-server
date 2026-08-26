@@ -403,6 +403,12 @@ router.post('/application', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
     await hydrateUser(user);
+    const restrictedStatus = String(user.accountStatus || '').trim().toLowerCase();
+    if (['blocked', 'suspended', 'deactivated'].includes(restrictedStatus)) {
+      return res.status(403).json({
+        message: `Your banking account is ${restrictedStatus}. Card details cannot be updated until staff restore banking access.`
+      });
+    }
     const address = req.body.address || {};
     const card = req.body.card || {};
     if (!address.line1 || !address.city || !address.state || !address.postalCode || !address.country) {
@@ -521,6 +527,12 @@ router.patch('/card-controls', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
     await hydrateUser(user);
+    const restrictedStatus = String(user.accountStatus || '').trim().toLowerCase();
+    if (['blocked', 'suspended', 'deactivated'].includes(restrictedStatus)) {
+      return res.status(403).json({
+        message: `Your banking account is ${restrictedStatus}. Card details cannot be updated until staff restore banking access.`
+      });
+    }
     if (!user?.card) {
       return res.status(400).json({ message: 'Add card details before configuring controls' });
     }
