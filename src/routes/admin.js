@@ -780,14 +780,26 @@ function requireManagerOrSuperAdmin(req, res, next) {
   });
 }
 
-router.get('/limit-requests', requireManagerOrSuperAdmin, async (_req, res) => {
+router.get('/limit-requests', requireManagerOrSuperAdmin, async (req, res) => {
   try {
-    const users = await User.find({
-      role: 'customer',
-      'pendingLimitRequest.status': 'pending'
-    }).sort({ 'pendingLimitRequest.requestedAt': -1 });
+    const statusRaw = String(req.query.status || 'pending')
+      .trim()
+      .toLowerCase();
+    const allowed = ['pending', 'approved', 'rejected', 'all'];
+    const status = allowed.includes(statusRaw) ? statusRaw : 'pending';
+    const filter = { role: 'customer' };
+    if (status === 'all') {
+      filter['pendingLimitRequest.status'] = { $in: ['pending', 'approved', 'rejected'] };
+    } else {
+      filter['pendingLimitRequest.status'] = status;
+    }
+    const users = await User.find(filter).sort({
+      'pendingLimitRequest.requestedAt': -1,
+      'pendingLimitRequest.decidedAt': -1
+    });
     await hydrateUsers(users);
     return res.json({
+      status,
       items: users.map((u) => ({
         ...u.toSafeJSON(),
         pendingLimitRequest: u.pendingLimitRequest

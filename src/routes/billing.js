@@ -226,12 +226,91 @@ function paidBillDateMatch(from, to) {
   };
 }
 
+function paidBillEffectiveDateExpr() {
+  return {
+    $ifNull: ['$paidAt', '$createdAt']
+  };
+}
+
+function salesSeriesBucketExpr(cadence) {
+  const date = paidBillEffectiveDateExpr();
+  if (cadence === 'daily') {
+    return {
+      key: { $dateToString: { format: '%Y-%m-%d', date } },
+      sort: date
+    };
+  }
+  if (cadence === 'monthly') {
+    return {
+      key: { $dateToString: { format: '%Y-%m', date } },
+      sort: date
+    };
+  }
+  if (cadence === 'biweekly') {
+    return {
+      key: {
+        $concat: [
+          { $dateToString: { format: '%G-', date } },
+          {
+            $toString: {
+              $floor: {
+                $divide: [{ $subtract: [{ $isoWeek: date }, 1] }, 2]
+              }
+            }
+          }
+        ]
+      },
+      sort: date
+    };
+  }
+  // weekly (ISO week)
+  return {
+    key: {
+      $concat: [
+        { $dateToString: { format: '%G-W', date } },
+        {
+          $cond: [
+            { $lt: [{ $isoWeek: date }, 10] },
+            { $concat: ['0', { $toString: { $isoWeek: date } }] },
+            { $toString: { $isoWeek: date } }
+          ]
+        }
+      ]
+    },
+    sort: date
+  };
+}
+
+function formatSeriesLabel(cadence, key) {
+  const raw = String(key || '');
+  if (cadence === 'daily') {
+    const d = new Date(`${raw}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+  }
+  if (cadence === 'monthly' && /^\d{4}-\d{2}$/.test(raw)) {
+    const d = new Date(`${raw}-01T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+    }
+  }
+  if (cadence === 'weekly') {
+    return raw.replace(/^(\d{4})-W0?/, '$1 W');
+  }
+  if (cadence === 'biweekly') {
+    return raw.replace(/^(\d{4})-/, '$1 B');
+  }
+  return raw;
+}
+
 router.get('/sales-reports', async (req, res) => {
   try {
     const { cadence, range, from, to } = resolveSalesDateRange(req.query || {});
     const match = paidBillDateMatch(from, to);
+    const bucket = salesSeriesBucketExpr(cadence);
 
-    const [productSales, customerPurchases, totalsAgg] = await Promise.all([
+    const [productSales, customerPurchases, totalsAgg, seriesAgg] = await Promise.all([
       Bill.aggregate([
         { $match: match },
         { $unwind: '$items' },
@@ -303,6 +382,26 @@ router.get('/sales-reports', async (req, res) => {
             orderCount: { $sum: 1 }
           }
         }
+      ]),
+      Bill.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            itemQty: { $sum: '$items.quantity' },
+            seriesKey: bucket.key,
+            seriesSort: bucket.sort
+          }
+        },
+        {
+          $group: {
+            _id: '$seriesKey',
+            revenue: { $sum: '$grandTotal' },
+            qty: { $sum: '$itemQty' },
+            orderCount: { $sum: 1 },
+            sortAt: { $min: '$seriesSort' }
+          }
+        },
+        { $sort: { sortAt: 1, _id: 1 } }
       ])
     ]);
 
@@ -313,6 +412,13 @@ router.get('/sales-reports', async (req, res) => {
       range,
       from: from.toISOString(),
       to: to.toISOString(),
+      series: seriesAgg.map((row) => ({
+        key: row._id,
+        label: formatSeriesLabel(cadence, row._id),
+        revenue: money(row.revenue),
+        qty: row.qty || 0,
+        orderCount: row.orderCount || 0
+      })),
       productSales: productSales.map((row) => ({
         name: row.name,
         qty: row.qty || 0,
