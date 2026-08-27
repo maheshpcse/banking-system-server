@@ -602,6 +602,99 @@ router.delete('/products/:id', requireBillingOperator, async (req, res) => {
   }
 });
 
+router.post('/products/bulk', requireBillingOperator, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!rows.length) {
+      return res.status(400).json({ message: 'At least one product row is required' });
+    }
+    if (rows.length > 200) {
+      return res.status(400).json({ message: 'Bulk upload is limited to 200 products per request' });
+    }
+
+    const existing = await BillingProduct.find({ active: true }).select('sku name');
+    const existingSkus = new Set(
+      existing.map((p) => String(p.sku || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const existingNames = new Set(
+      existing.map((p) => String(p.name || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const batchSkus = new Set();
+    const batchNames = new Set();
+    const created = [];
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const name = String(row.name || '').trim();
+      const sku = String(row.sku || '').trim();
+      const price = Number(row.price);
+      const stock = Number(row.stock);
+      const gstPercentage = Number(row.gstPercentage ?? 18);
+      const category = String(row.category || '').trim();
+      const issues = [];
+
+      if (!name || name.length < 2) issues.push('Name is required (min 2 characters)');
+      if (Number.isNaN(price) || price < 0) issues.push('Valid price (>= 0) is required');
+      if (Number.isNaN(stock) || stock < 0) issues.push('Valid stock (>= 0) is required');
+      if (Number.isNaN(gstPercentage) || gstPercentage < 0 || gstPercentage > 100) {
+        issues.push('GST must be between 0 and 100');
+      }
+      const skuKey = sku.toLowerCase();
+      const nameKey = name.toLowerCase();
+      if (skuKey && (existingSkus.has(skuKey) || batchSkus.has(skuKey))) {
+        issues.push('Duplicate SKU');
+      }
+      if (nameKey && (existingNames.has(nameKey) || batchNames.has(nameKey))) {
+        issues.push('Duplicate product name');
+      }
+
+      if (issues.length) {
+        errors.push({ index: i, name, sku, message: issues.join('; ') });
+        continue;
+      }
+
+      try {
+        const product = await BillingProduct.create({
+          name,
+          sku,
+          price: money(price),
+          stock: Math.floor(stock),
+          gstPercentage,
+          active: true,
+          category,
+          images: [],
+          createdBy: req.user._id
+        });
+        created.push(product.toSafeJSON());
+        if (skuKey) {
+          existingSkus.add(skuKey);
+          batchSkus.add(skuKey);
+        }
+        if (nameKey) {
+          existingNames.add(nameKey);
+          batchNames.add(nameKey);
+        }
+      } catch (err) {
+        errors.push({ index: i, name, sku, message: err.message || 'Unable to create product' });
+      }
+    }
+
+    return res.status(created.length ? 201 : 400).json({
+      message: created.length
+        ? `Uploaded ${created.length} product${created.length === 1 ? '' : 's'}`
+        : 'No products were uploaded',
+      created,
+      errors,
+      createdCount: created.length,
+      errorCount: errors.length
+    });
+  } catch (error) {
+    console.error('Billing products bulk error:', error);
+    return res.status(500).json({ message: 'Unable to bulk upload products' });
+  }
+});
+
 /* ---------- Customers ---------- */
 
 router.get('/customers', async (req, res) => {
@@ -681,6 +774,108 @@ router.delete('/customers/:id', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing customer delete error:', error);
     return res.status(500).json({ message: 'Unable to remove customer' });
+  }
+});
+
+router.post('/customers/bulk', requireBillingOperator, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!rows.length) {
+      return res.status(400).json({ message: 'At least one customer row is required' });
+    }
+    if (rows.length > 200) {
+      return res.status(400).json({ message: 'Bulk upload is limited to 200 customers per request' });
+    }
+
+    const existing = await BillingCustomer.find().select('email phone name bankingAccountNumber');
+    const existingEmails = new Set(
+      existing.map((c) => String(c.email || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const existingPhones = new Set(
+      existing.map((c) => String(c.phone || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const existingAccounts = new Set(
+      existing.map((c) => String(c.bankingAccountNumber || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const batchEmails = new Set();
+    const batchPhones = new Set();
+    const batchAccounts = new Set();
+    const created = [];
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const name = String(row.name || '').trim();
+      const email = String(row.email || '').trim().toLowerCase();
+      const phone = String(row.phone || '').trim();
+      const address = String(row.address || '').trim();
+      const bankingAccountNumber = String(row.bankingAccountNumber || '').trim() || null;
+      const issues = [];
+
+      if (!name || name.length < 2) issues.push('Name is required (min 2 characters)');
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) issues.push('Invalid email');
+      if (email && (existingEmails.has(email) || batchEmails.has(email))) issues.push('Duplicate email');
+      if (phone && (existingPhones.has(phone.toLowerCase()) || batchPhones.has(phone.toLowerCase()))) {
+        issues.push('Duplicate phone');
+      }
+      if (
+        bankingAccountNumber &&
+        (existingAccounts.has(bankingAccountNumber.toLowerCase()) ||
+          batchAccounts.has(bankingAccountNumber.toLowerCase()))
+      ) {
+        issues.push('Duplicate banking account number');
+      }
+
+      if (issues.length) {
+        errors.push({ index: i, name, email, phone, message: issues.join('; ') });
+        continue;
+      }
+
+      try {
+        const customer = await BillingCustomer.create({
+          name,
+          email,
+          phone,
+          address,
+          bankingAccountNumber,
+          createdBy: req.user._id
+        });
+        created.push(customer.toSafeJSON());
+        if (email) {
+          existingEmails.add(email);
+          batchEmails.add(email);
+        }
+        if (phone) {
+          existingPhones.add(phone.toLowerCase());
+          batchPhones.add(phone.toLowerCase());
+        }
+        if (bankingAccountNumber) {
+          existingAccounts.add(bankingAccountNumber.toLowerCase());
+          batchAccounts.add(bankingAccountNumber.toLowerCase());
+        }
+      } catch (err) {
+        errors.push({
+          index: i,
+          name,
+          email,
+          phone,
+          message: err.message || 'Unable to create customer'
+        });
+      }
+    }
+
+    return res.status(created.length ? 201 : 400).json({
+      message: created.length
+        ? `Uploaded ${created.length} customer${created.length === 1 ? '' : 's'}`
+        : 'No customers were uploaded',
+      created,
+      errors,
+      createdCount: created.length,
+      errorCount: errors.length
+    });
+  } catch (error) {
+    console.error('Billing customers bulk error:', error);
+    return res.status(500).json({ message: 'Unable to bulk upload customers' });
   }
 });
 
