@@ -496,14 +496,35 @@ router.get('/dashboard/stats', async (_req, res) => {
 router.get('/products', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
+    const category = String(req.query.category || '').trim();
+    const inStock = String(req.query.inStock || '').trim() === '1';
+    const activeOnly = String(req.query.active || '').trim() === '1';
+    const sortRaw = String(req.query.sort || 'name').trim().toLowerCase();
     const filter = {};
     if (q) {
       filter.$or = [
         { name: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
-        { sku: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+        { sku: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { category: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
       ];
     }
-    const items = await BillingProduct.find(filter).sort({ name: 1 });
+    if (category) {
+      filter.category = new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    }
+    if (inStock) {
+      filter.stock = { $gt: 0 };
+      filter.active = true;
+    }
+    if (activeOnly) {
+      filter.active = true;
+    }
+    let sort = { name: 1 };
+    if (sortRaw === 'price_asc') sort = { price: 1, name: 1 };
+    else if (sortRaw === 'price_desc') sort = { price: -1, name: 1 };
+    else if (sortRaw === 'stock') sort = { stock: -1, name: 1 };
+    else if (sortRaw === 'rating') sort = { ratingSum: -1, ratingCount: -1, name: 1 };
+    else if (sortRaw === 'newest') sort = { createdAt: -1 };
+    const items = await BillingProduct.find(filter).sort(sort);
     return res.json({ items: items.map((p) => p.toSafeJSON()) });
   } catch (error) {
     console.error('Billing products list error:', error);
@@ -520,6 +541,9 @@ router.post('/products', requireBillingOperator, async (req, res) => {
     if (!name || Number.isNaN(price) || price < 0 || Number.isNaN(stock) || stock < 0) {
       return res.status(400).json({ message: 'Valid name, price, and stock are required' });
     }
+    const images = Array.isArray(req.body?.images)
+      ? req.body.images.map((u) => String(u || '').trim()).filter(Boolean).slice(0, 8)
+      : [];
     const product = await BillingProduct.create({
       name,
       sku: String(req.body?.sku || '').trim(),
@@ -527,6 +551,8 @@ router.post('/products', requireBillingOperator, async (req, res) => {
       stock: Math.floor(stock),
       gstPercentage: Number.isNaN(gstPercentage) ? 18 : gstPercentage,
       active: req.body?.active !== false,
+      category: String(req.body?.category || '').trim(),
+      images,
       createdBy: req.user._id
     });
     return res.status(201).json({ message: 'Product created', product: product.toSafeJSON() });
@@ -548,6 +574,10 @@ router.put('/products/:id', requireBillingOperator, async (req, res) => {
     if (req.body?.stock != null) product.stock = Math.floor(Number(req.body.stock));
     if (req.body?.gstPercentage != null) product.gstPercentage = Number(req.body.gstPercentage);
     if (req.body?.active != null) product.active = !!req.body.active;
+    if (req.body?.category != null) product.category = String(req.body.category).trim();
+    if (Array.isArray(req.body?.images)) {
+      product.images = req.body.images.map((u) => String(u || '').trim()).filter(Boolean).slice(0, 8);
+    }
     await product.save();
     return res.json({ message: 'Product updated', product: product.toSafeJSON() });
   } catch (error) {
