@@ -571,6 +571,12 @@ router.post('/limits/request', async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
     await hydrateUser(user);
+    const restrictedStatus = String(user.accountStatus || '').trim().toLowerCase();
+    if (['blocked', 'suspended', 'deactivated'].includes(restrictedStatus)) {
+      return res.status(403).json({
+        message: `Your banking account is ${restrictedStatus}. Limit changes cannot be requested until staff restore banking access.`
+      });
+    }
     if (user.pendingLimitRequest?.status === 'pending') {
       return res.status(400).json({ message: 'A limit change request is already pending manager review' });
     }
