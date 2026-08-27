@@ -13,12 +13,20 @@ const billingProductSchema = new mongoose.Schema(
       type: [{ type: String, trim: true, maxlength: 500 }],
       default: []
     },
+    expiresAt: { type: Date, default: null, index: true },
+    expiredAt: { type: Date, default: null },
+    expiredNotified: { type: Boolean, default: false },
     ratingSum: { type: Number, default: 0 },
     ratingCount: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
   { timestamps: true }
 );
+
+billingProductSchema.methods.isExpired = function isExpired(now = new Date()) {
+  if (!this.expiresAt) return false;
+  return new Date(this.expiresAt).getTime() <= now.getTime();
+};
 
 billingProductSchema.methods.toSafeJSON = function toSafeJSON() {
   const ratingCount = Number(this.ratingCount) || 0;
@@ -36,6 +44,8 @@ billingProductSchema.methods.toSafeJSON = function toSafeJSON() {
     active: !!this.active,
     category: this.category || '',
     images,
+    expiresAt: this.expiresAt ? this.expiresAt.toISOString() : null,
+    expiredAt: this.expiredAt ? this.expiredAt.toISOString() : null,
     ratingCount,
     ratingAvg: ratingCount ? Math.round((ratingSum / ratingCount) * 10) / 10 : 0,
     createdAt: this.createdAt?.toISOString?.() || this.createdAt

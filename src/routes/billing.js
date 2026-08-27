@@ -8,6 +8,7 @@ const Payment = require('../models/Payment');
 const BillingComplaint = require('../models/BillingComplaint');
 const BillingSettings = require('../models/BillingSettings');
 const BillingCoupon = require('../models/BillingCoupon');
+const BillingCategory = require('../models/BillingCategory');
 const { notifyManagers, notifySuperAdmins, notifyContact } = require('../services/notify-channels');
 
 const router = express.Router();
@@ -154,6 +155,69 @@ async function expireCouponsNow() {
     { active: true, expiresAt: { $ne: null, $lt: now } },
     { $set: { active: false } }
   );
+}
+
+/**
+ * Auto-remove expired catalog products: deactivate, zero stock, notify once.
+ * Mirrors coupon expiry — called from product list/get (and create/update).
+ */
+async function expireProductsNow() {
+  const now = new Date();
+  const due = await BillingProduct.find({
+    active: true,
+    expiresAt: { $ne: null, $lte: now }
+  }).limit(100);
+  if (!due.length) {
+    return 0;
+  }
+  for (const product of due) {
+    product.active = false;
+    product.stock = 0;
+    if (!product.expiredAt) {
+      product.expiredAt = now;
+    }
+    const shouldNotify = !product.expiredNotified;
+    if (shouldNotify) {
+      product.expiredNotified = true;
+    }
+    await product.save();
+    if (shouldNotify) {
+      try {
+        await notifyManagers(
+          'billing',
+          'Product auto-expired',
+          `${product.name}${product.sku ? ` (${product.sku})` : ''} expired and was removed from the shop catalog.`,
+          '/billing/products'
+        );
+      } catch (notifyError) {
+        console.warn('Product expiry notify failed:', notifyError.message);
+      }
+    }
+  }
+  return due.length;
+}
+
+function slugifyCategory(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100);
+}
+
+function parseExpiresAt(raw) {
+  if (raw === undefined) {
+    return { ok: true, value: undefined };
+  }
+  if (raw == null || raw === '') {
+    return { ok: true, value: null };
+  }
+  const expiresAt = new Date(raw);
+  if (Number.isNaN(expiresAt.getTime())) {
+    return { ok: false, message: 'Invalid product expiry date' };
+  }
+  return { ok: true, value: expiresAt };
 }
 
 /* ---------- Sales target reports (paid bills) ---------- */
@@ -495,6 +559,7 @@ router.get('/dashboard/stats', async (_req, res) => {
 
 router.get('/products', async (req, res) => {
   try {
+    await expireProductsNow();
     const q = String(req.query.q || '').trim();
     const category = String(req.query.category || '').trim();
     const inStock = String(req.query.inStock || '').trim() === '1';
@@ -534,6 +599,7 @@ router.get('/products', async (req, res) => {
 
 router.post('/products', requireBillingOperator, async (req, res) => {
   try {
+    await expireProductsNow();
     const name = String(req.body?.name || '').trim();
     const price = Number(req.body?.price);
     const stock = Number(req.body?.stock);
@@ -544,6 +610,10 @@ router.post('/products', requireBillingOperator, async (req, res) => {
     const images = Array.isArray(req.body?.images)
       ? req.body.images.map((u) => String(u || '').trim()).filter(Boolean).slice(0, 8)
       : [];
+    const expiry = parseExpiresAt(req.body?.expiresAt);
+    if (!expiry.ok) {
+      return res.status(400).json({ message: expiry.message });
+    }
     const product = await BillingProduct.create({
       name,
       sku: String(req.body?.sku || '').trim(),
@@ -553,6 +623,9 @@ router.post('/products', requireBillingOperator, async (req, res) => {
       active: req.body?.active !== false,
       category: String(req.body?.category || '').trim(),
       images,
+      expiresAt: expiry.value === undefined ? null : expiry.value,
+      expiredAt: null,
+      expiredNotified: false,
       createdBy: req.user._id
     });
     return res.status(201).json({ message: 'Product created', product: product.toSafeJSON() });
@@ -564,6 +637,7 @@ router.post('/products', requireBillingOperator, async (req, res) => {
 
 router.put('/products/:id', requireBillingOperator, async (req, res) => {
   try {
+    await expireProductsNow();
     const product = await BillingProduct.findById(req.params.id);
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
@@ -578,6 +652,20 @@ router.put('/products/:id', requireBillingOperator, async (req, res) => {
     if (Array.isArray(req.body?.images)) {
       product.images = req.body.images.map((u) => String(u || '').trim()).filter(Boolean).slice(0, 8);
     }
+    if (req.body?.expiresAt !== undefined) {
+      const expiry = parseExpiresAt(req.body.expiresAt);
+      if (!expiry.ok) {
+        return res.status(400).json({ message: expiry.message });
+      }
+      product.expiresAt = expiry.value;
+      if (expiry.value == null) {
+        product.expiredAt = null;
+        product.expiredNotified = false;
+      } else if (expiry.value.getTime() > Date.now() && product.active) {
+        product.expiredAt = null;
+        product.expiredNotified = false;
+      }
+    }
     await product.save();
     return res.json({ message: 'Product updated', product: product.toSafeJSON() });
   } catch (error) {
@@ -586,11 +674,20 @@ router.put('/products/:id', requireBillingOperator, async (req, res) => {
   }
 });
 
+/** Soft archive — product leaves the active catalog but remains in DB. */
 router.delete('/products/:id', requireBillingOperator, async (req, res) => {
   try {
     const product = await BillingProduct.findById(req.params.id);
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
+    }
+    const hard =
+      String(req.query.hard || '').trim() === '1' ||
+      String(req.body?.hard || '').trim() === '1' ||
+      String(req.body?.mode || '').trim().toLowerCase() === 'hard';
+    if (hard) {
+      await product.deleteOne();
+      return res.json({ message: 'Product permanently deleted' });
     }
     product.active = false;
     product.stock = 0;
@@ -599,6 +696,22 @@ router.delete('/products/:id', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing product delete error:', error);
     return res.status(500).json({ message: 'Unable to archive product' });
+  }
+});
+
+/** Explicit hard delete (clearer remove). */
+router.post('/products/:id/purge', requireBillingOperator, async (req, res) => {
+  try {
+    const product = await BillingProduct.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    const name = product.name;
+    await product.deleteOne();
+    return res.json({ message: `Product “${name}” permanently deleted` });
+  } catch (error) {
+    console.error('Billing product purge error:', error);
+    return res.status(500).json({ message: 'Unable to delete product' });
   }
 });
 
@@ -1638,6 +1751,153 @@ router.post('/seed', requireBillingOperator, async (req, res) => {
   } catch (error) {
     console.error('Billing seed error:', error);
     return res.status(500).json({ message: 'Unable to seed billing data' });
+  }
+});
+
+/* ---------- Categories ---------- */
+
+router.get('/categories', async (req, res) => {
+  try {
+    const includeInactive = String(req.query.includeInactive || '') === '1';
+    const filter = includeInactive ? {} : { active: true };
+    let items = await BillingCategory.find(filter).sort({ sortOrder: 1, name: 1 });
+    if (!items.length) {
+      const defaults = [
+        'Grocery',
+        'Beverages',
+        'Snacks',
+        'Electronics',
+        'Home',
+        'Personal care',
+        'Apparel',
+        'Stationery'
+      ];
+      for (let i = 0; i < defaults.length; i += 1) {
+        const name = defaults[i];
+        const slug = slugifyCategory(name);
+        // eslint-disable-next-line no-await-in-loop
+        await BillingCategory.findOneAndUpdate(
+          { slug },
+          {
+            $setOnInsert: {
+              name,
+              slug,
+              description: `${name} aisle`,
+              active: true,
+              sortOrder: i + 1
+            }
+          },
+          { upsert: true, new: true }
+        );
+      }
+      items = await BillingCategory.find(filter).sort({ sortOrder: 1, name: 1 });
+    }
+    return res.json({ items: items.map((c) => c.toSafeJSON()) });
+  } catch (error) {
+    console.error('Billing categories list error:', error);
+    return res.status(500).json({ message: 'Unable to load categories' });
+  }
+});
+
+router.post('/categories', requireBillingOperator, async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name || name.length < 2) {
+      return res.status(400).json({ message: 'Category name is required (min 2 characters)' });
+    }
+    let slug = String(req.body?.slug || '').trim().toLowerCase() || slugifyCategory(name);
+    if (!slug) {
+      return res.status(400).json({ message: 'Unable to derive a slug from the category name' });
+    }
+    const existing = await BillingCategory.findOne({ slug });
+    if (existing) {
+      return res.status(409).json({ message: 'A category with this slug already exists' });
+    }
+    const sortOrder = Number(req.body?.sortOrder);
+    const category = await BillingCategory.create({
+      name,
+      slug,
+      description: String(req.body?.description || '').trim(),
+      active: req.body?.active !== false,
+      sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+      createdBy: req.user._id,
+      updatedBy: req.user._id
+    });
+    return res.status(201).json({ message: 'Category created', category: category.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing category create error:', error);
+    return res.status(500).json({ message: 'Unable to create category' });
+  }
+});
+
+router.put('/categories/:id', requireBillingOperator, async (req, res) => {
+  try {
+    const category = await BillingCategory.findById(req.params.id);
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    if (req.body?.name != null) {
+      const name = String(req.body.name).trim();
+      if (!name || name.length < 2) {
+        return res.status(400).json({ message: 'Category name is required (min 2 characters)' });
+      }
+      category.name = name;
+    }
+    if (req.body?.slug != null) {
+      const slug = String(req.body.slug).trim().toLowerCase() || slugifyCategory(category.name);
+      if (!slug) {
+        return res.status(400).json({ message: 'Invalid category slug' });
+      }
+      const clash = await BillingCategory.findOne({ slug, _id: { $ne: category._id } });
+      if (clash) {
+        return res.status(409).json({ message: 'A category with this slug already exists' });
+      }
+      category.slug = slug;
+    }
+    if (req.body?.description != null) {
+      category.description = String(req.body.description).trim();
+    }
+    if (req.body?.sortOrder != null) {
+      const sortOrder = Number(req.body.sortOrder);
+      category.sortOrder = Number.isFinite(sortOrder) ? sortOrder : 0;
+    }
+    if (req.body?.active != null) category.active = !!req.body.active;
+    category.updatedBy = req.user._id;
+    await category.save();
+    return res.json({ message: 'Category updated', category: category.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing category update error:', error);
+    return res.status(500).json({ message: 'Unable to update category' });
+  }
+});
+
+router.post('/categories/:id/deactivate', requireBillingOperator, async (req, res) => {
+  try {
+    const category = await BillingCategory.findById(req.params.id);
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    category.active = false;
+    category.updatedBy = req.user._id;
+    await category.save();
+    return res.json({ message: 'Category deactivated', category: category.toSafeJSON() });
+  } catch (error) {
+    console.error('Billing category deactivate error:', error);
+    return res.status(500).json({ message: 'Unable to deactivate category' });
+  }
+});
+
+router.delete('/categories/:id', requireBillingOperator, async (req, res) => {
+  try {
+    const category = await BillingCategory.findById(req.params.id);
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    await category.deleteOne();
+    return res.json({ message: 'Category deleted' });
+  } catch (error) {
+    console.error('Billing category delete error:', error);
+    return res.status(500).json({ message: 'Unable to delete category' });
   }
 });
 
