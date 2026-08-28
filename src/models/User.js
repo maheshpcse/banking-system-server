@@ -192,6 +192,15 @@ const userSchema = new mongoose.Schema(
       lockedUntil: { type: Date, default: null },
       lastFailedAt: { type: Date, default: null }
     },
+    /** One-time login codes (email / phone). Cleared after successful verify. */
+    loginOtp: {
+      codeHash: { type: String, default: null },
+      channel: { type: String, default: null },
+      destination: { type: String, default: null },
+      expiresAt: { type: Date, default: null },
+      attempts: { type: Number, default: 0, min: 0 },
+      sentAt: { type: Date, default: null }
+    },
     avatar: {
       style: {
         type: String,
