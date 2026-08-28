@@ -4,7 +4,8 @@ const User = require('../models/User');
 const ContactAdminRequest = require('../models/ContactAdminRequest');
 const auth = require('../middleware/auth');
 const { hydrateUser } = require('../services/user-domain');
-const { notifyManagers, notifySuperAdmins } = require('../services/notify-channels');
+const { notifyManagers, notifySuperAdmins, sendEmail, sendSms } = require('../services/notify-channels');
+const crypto = require('crypto');
 
 const router = express.Router();
 
@@ -59,6 +60,49 @@ async function findByIdentifier(identifier) {
     return User.findOne({ email: raw.toLowerCase() });
   }
   return User.findOne({ username: normalizeUsername(raw) });
+}
+
+async function findUserForOtp(channel, identifier) {
+  const raw = String(identifier || '').trim();
+  if (!raw) {
+    return null;
+  }
+  if (channel === 'email') {
+    if (looksLikeEmail(raw)) {
+      return User.findOne({ email: raw.toLowerCase() });
+    }
+    return User.findOne({
+      $or: [{ email: raw.toLowerCase() }, { username: normalizeUsername(raw) }]
+    });
+  }
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 8) {
+    return null;
+  }
+  return User.findOne({
+    $or: [{ phone: digits }, { phone: raw }, { username: normalizeUsername(raw) }]
+  });
+}
+
+function maskDestination(channel, value) {
+  const raw = String(value || '');
+  if (channel === 'email') {
+    const [user, domain] = raw.split('@');
+    if (!domain) {
+      return '***';
+    }
+    const keep = Math.min(2, user.length);
+    return `${user.slice(0, keep)}***@${domain}`;
+  }
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 4) {
+    return '***';
+  }
+  return `***${digits.slice(-4)}`;
+}
+
+function hashOtp(code) {
+  return crypto.createHash('sha256').update(String(code)).digest('hex');
 }
 
 function effectiveLoginStatus(user) {
@@ -511,6 +555,231 @@ router.post('/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     return res.status(500).json({ message: 'Unable to login' });
+  }
+});
+
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+
+router.post('/otp/request', async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || '').trim().toLowerCase();
+    const identifier = String(req.body?.identifier || '').trim();
+    if (channel !== 'email' && channel !== 'phone') {
+      return res.status(400).json({
+        code: 'OTP_CHANNEL_INVALID',
+        message: 'Choose email or phone for OTP sign-in.'
+      });
+    }
+    if (!identifier || identifier.length < 3) {
+      return res.status(400).json({
+        code: 'OTP_IDENTIFIER_REQUIRED',
+        message: channel === 'email' ? 'Enter your username or email.' : 'Enter your phone number.'
+      });
+    }
+
+    const user = await findUserForOtp(channel, identifier);
+    if (!user) {
+      return res.status(404).json({
+        code: 'OTP_USER_NOT_FOUND',
+        message:
+          channel === 'email'
+            ? 'No account matches that username or email.'
+            : 'No account matches that phone number.'
+      });
+    }
+    await hydrateUser(user);
+
+    const lifecycle = accountLifecycleBlock(user);
+    if (lifecycle) {
+      return res.status(403).json(lifecycle);
+    }
+
+    let destination = '';
+    if (channel === 'email') {
+      destination = String(user.email || '').trim().toLowerCase();
+      if (!destination || !looksLikeEmail(destination)) {
+        return res.status(400).json({
+          code: 'OTP_CHANNEL_UNAVAILABLE',
+          message: 'This account has no email on file for OTP sign-in.'
+        });
+      }
+    } else {
+      destination = String(user.phone || '').replace(/\D/g, '');
+      if (destination.length < 8) {
+        return res.status(400).json({
+          code: 'OTP_CHANNEL_UNAVAILABLE',
+          message: 'This account has no phone number on file for OTP sign-in.'
+        });
+      }
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    user.loginOtp = {
+      codeHash: hashOtp(code),
+      channel,
+      destination,
+      expiresAt: new Date(Date.now() + OTP_TTL_MS),
+      attempts: 0,
+      sentAt: new Date()
+    };
+    await user.save();
+
+    const brand = 'NovaBank';
+    const body = `${brand} sign-in code: ${code}. It expires in 10 minutes.`;
+    let delivered = false;
+    try {
+      if (channel === 'email') {
+        const result = await sendEmail({
+          to: destination,
+          subject: `${brand} sign-in code`,
+          text: body
+        });
+        delivered = !!(result && result.sent);
+      } else {
+        const e164 = destination.startsWith('+') ? destination : `+${destination}`;
+        const result = await sendSms({ to: e164, body });
+        delivered = !!(result && result.sent);
+      }
+    } catch (notifyError) {
+      console.warn('OTP delivery fallback (logged only):', notifyError?.message || notifyError);
+    }
+    if (!delivered) {
+      console.info(`[otp] ${channel} → ${destination}: ${code}`);
+    }
+
+    return res.json({
+      message: 'OTP sent and will expire in 10 minutes.',
+      expiresInMinutes: 10,
+      channel,
+      maskedDestination: maskDestination(channel, destination)
+    });
+  } catch (error) {
+    console.error('OTP request error:', error);
+    return res.status(500).json({ message: 'Unable to send OTP' });
+  }
+});
+
+router.post('/otp/verify', async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || '').trim().toLowerCase();
+    const identifier = String(req.body?.identifier || '').trim();
+    const code = String(req.body?.code || '').trim();
+    if (channel !== 'email' && channel !== 'phone') {
+      return res.status(400).json({
+        code: 'OTP_CHANNEL_INVALID',
+        message: 'Choose email or phone for OTP sign-in.'
+      });
+    }
+    if (!identifier || !code) {
+      return res.status(400).json({
+        code: 'OTP_REQUIRED',
+        message: 'Enter the OTP code you received.'
+      });
+    }
+
+    const user = await findUserForOtp(channel, identifier);
+    if (!user?.loginOtp?.codeHash) {
+      return res.status(400).json({
+        code: 'OTP_NOT_FOUND',
+        message: 'No active OTP found. Request a new code.'
+      });
+    }
+    await hydrateUser(user);
+
+    if (String(user.loginOtp.channel || '') !== channel) {
+      return res.status(400).json({
+        code: 'OTP_CHANNEL_MISMATCH',
+        message: 'Request a new OTP for this sign-in method.'
+      });
+    }
+
+    const expiresAt = user.loginOtp.expiresAt ? new Date(user.loginOtp.expiresAt).getTime() : 0;
+    if (!expiresAt || expiresAt <= Date.now()) {
+      user.loginOtp = {
+        codeHash: null,
+        channel: null,
+        destination: null,
+        expiresAt: null,
+        attempts: 0,
+        sentAt: null
+      };
+      await user.save();
+      return res.status(400).json({
+        code: 'OTP_EXPIRED',
+        message: 'This OTP has expired. Request a new code.'
+      });
+    }
+
+    if ((user.loginOtp.attempts || 0) >= OTP_MAX_ATTEMPTS) {
+      user.loginOtp = {
+        codeHash: null,
+        channel: null,
+        destination: null,
+        expiresAt: null,
+        attempts: 0,
+        sentAt: null
+      };
+      await user.save();
+      return res.status(429).json({
+        code: 'OTP_LOCKED',
+        message: 'Too many invalid OTP attempts. Request a new code.'
+      });
+    }
+
+    if (hashOtp(code) !== user.loginOtp.codeHash) {
+      user.loginOtp.attempts = (user.loginOtp.attempts || 0) + 1;
+      await user.save();
+      return res.status(401).json({
+        code: 'OTP_INVALID',
+        message: 'Invalid OTP. Check the code and try again.'
+      });
+    }
+
+    const lifecycle = accountLifecycleBlock(user);
+    if (lifecycle) {
+      return res.status(403).json(lifecycle);
+    }
+
+    const role = user.role || 'customer';
+    if ((role === 'manager' || role === 'admin') && !user.isSuperAdmin) {
+      if ((user.staffStatus || 'active') === 'pending_approval') {
+        return res.status(403).json({
+          code: 'STAFF_PENDING',
+          message:
+            'Your staff access is awaiting Super Admin verification. Activation usually completes within 24 hours.'
+        });
+      }
+      if (user.staffStatus === 'rejected') {
+        return res.status(403).json({
+          code: 'STAFF_REJECTED',
+          message: 'This staff registration was not approved. Contact NovaBank Super Admin for next steps.'
+        });
+      }
+    }
+
+    user.loginOtp = {
+      codeHash: null,
+      channel: null,
+      destination: null,
+      expiresAt: null,
+      attempts: 0,
+      sentAt: null
+    };
+    if (user.loginAttempts?.count || user.loginAttempts?.lockedUntil) {
+      user.loginAttempts = { count: 0, lockedUntil: null, lastFailedAt: null };
+    }
+    await user.save();
+
+    const token = signToken(user);
+    return res.json({
+      message: 'Login successful',
+      token,
+      user: user.toSafeJSON()
+    });
+  } catch (error) {
+    console.error('OTP verify error:', error);
+    return res.status(500).json({ message: 'Unable to verify OTP' });
   }
 });
 
