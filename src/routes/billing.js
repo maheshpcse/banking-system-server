@@ -110,8 +110,16 @@ function paymentRef(method) {
 /**
  * Resolve coupon discount for a cart subtotal / optional payment method.
  * Returns { ok, status, message, coupon?, discount? }.
+ * Optional customer / hasBankingAccount / customerId for bank-kind coupons.
  */
-async function resolveCouponDiscount({ code, subtotal, paymentMethod }) {
+async function resolveCouponDiscount({
+  code,
+  subtotal,
+  paymentMethod,
+  customer,
+  hasBankingAccount,
+  customerId
+}) {
   const normalized = String(code || '').trim().toUpperCase();
   if (!normalized) {
     return { ok: false, status: 400, message: 'Coupon code is required' };
@@ -134,6 +142,26 @@ async function resolveCouponDiscount({ code, subtotal, paymentMethod }) {
       message: `Minimum subtotal of ${money(coupon.minSubtotal).toFixed(2)} required for this coupon`
     };
   }
+
+  let bankingOk =
+    typeof hasBankingAccount === 'boolean'
+      ? hasBankingAccount
+      : customer
+        ? Boolean(String(customer.bankingAccountNumber || '').trim())
+        : null;
+  if (bankingOk == null && customerId) {
+    const loaded = await BillingCustomer.findById(customerId).select('bankingAccountNumber');
+    bankingOk = Boolean(loaded && String(loaded.bankingAccountNumber || '').trim());
+  }
+
+  if (coupon.kind === 'bank' && !bankingOk) {
+    return {
+      ok: false,
+      status: 400,
+      message: 'Bank-linked coupons require a customer with a banking account number'
+    };
+  }
+
   if (paymentMethod && !coupon.allowsPaymentMethod(paymentMethod)) {
     return {
       ok: false,
@@ -1119,7 +1147,10 @@ router.post('/bills', requireBillingOperator, async (req, res) => {
       const resolved = await resolveCouponDiscount({
         code: couponCodeRaw,
         subtotal,
-        paymentMethod: req.body?.paymentMethod
+        paymentMethod: req.body?.paymentMethod,
+        customer,
+        hasBankingAccount: Boolean(String(customer.bankingAccountNumber || '').trim()),
+        customerId
       });
       if (!resolved.ok) {
         return res.status(resolved.status || 400).json({ message: resolved.message });
@@ -1919,10 +1950,22 @@ router.get('/coupons', async (req, res) => {
 router.post('/coupons/validate', requireBillingOperator, async (req, res) => {
   try {
     await expireCouponsNow();
+    const customerId = String(req.body?.customerId || '').trim();
+    let hasBankingAccount;
+    let customerDoc = null;
+    if (customerId) {
+      customerDoc = await BillingCustomer.findById(customerId).select('bankingAccountNumber');
+      hasBankingAccount = Boolean(
+        customerDoc && String(customerDoc.bankingAccountNumber || '').trim()
+      );
+    }
     const resolved = await resolveCouponDiscount({
       code: req.body?.code,
       subtotal: req.body?.subtotal,
-      paymentMethod: req.body?.paymentMethod
+      paymentMethod: req.body?.paymentMethod,
+      customerId: customerId || undefined,
+      hasBankingAccount,
+      customer: customerDoc || undefined
     });
     if (!resolved.ok) {
       return res.status(resolved.status || 400).json({ message: resolved.message });
