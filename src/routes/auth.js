@@ -628,19 +628,19 @@ router.post('/otp/request', async (req, res) => {
     const brand = 'NovaBank';
     const body = `${brand} sign-in code: ${code}. It expires in 10 minutes.`;
     let delivered = false;
+    let deliveryResult = null;
     try {
       if (channel === 'email') {
-        const result = await sendEmail({
+        deliveryResult = await sendEmail({
           to: destination,
           subject: `${brand} sign-in code`,
           text: body
         });
-        delivered = !!(result && result.sent);
       } else {
         const e164 = destination.startsWith('+') ? destination : `+${destination}`;
-        const result = await sendSms({ to: e164, body });
-        delivered = !!(result && result.sent);
+        deliveryResult = await sendSms({ to: e164, body });
       }
+      delivered = !!(deliveryResult && deliveryResult.sent && !deliveryResult.skipped);
     } catch (notifyError) {
       console.warn('OTP delivery fallback (logged only):', notifyError?.message || notifyError);
     }
@@ -652,7 +652,8 @@ router.post('/otp/request', async (req, res) => {
       message: 'OTP sent and will expire in 10 minutes.',
       expiresInMinutes: 10,
       channel,
-      maskedDestination: maskDestination(channel, destination)
+      maskedDestination: maskDestination(channel, destination),
+      delivered
     });
   } catch (error) {
     console.error('OTP request error:', error);
