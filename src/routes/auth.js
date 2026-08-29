@@ -350,6 +350,11 @@ router.post('/login', async (req, res) => {
     }
     await hydrateUser(user);
 
+    /* Portal gate before password — Super Admin must use Apex Console only. */
+    if (user.isSuperAdmin) {
+      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
+    }
+
     const lockedUntil = user.loginAttempts?.lockedUntil
       ? new Date(user.loginAttempts.lockedUntil).getTime()
       : 0;
@@ -394,10 +399,6 @@ router.post('/login', async (req, res) => {
     const lifecycle = accountLifecycleBlock(user);
     if (lifecycle) {
       return res.status(403).json(lifecycle);
-    }
-
-    if (user.isSuperAdmin) {
-      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
     }
 
     const staffBlock = staffAccessBlock(user);
@@ -548,6 +549,10 @@ router.post('/otp/verify', async (req, res) => {
     }
     await hydrateUser(user);
 
+    if (user.isSuperAdmin) {
+      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
+    }
+
     if (String(user.loginOtp.channel || '') !== channel) {
       return res.status(400).json({
         code: 'OTP_CHANNEL_MISMATCH',
@@ -586,10 +591,6 @@ router.post('/otp/verify', async (req, res) => {
     const lifecycle = accountLifecycleBlock(user);
     if (lifecycle) {
       return res.status(403).json(lifecycle);
-    }
-
-    if (user.isSuperAdmin) {
-      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
     }
 
     const staffBlock = staffAccessBlock(user);

@@ -43,6 +43,11 @@ router.post('/login', async (req, res) => {
     }
     await hydrateUser(user);
 
+    /* Portal gate before password — Console is Super Admin only. */
+    if (!user.isSuperAdmin) {
+      return res.status(403).json(nonSuperAdminUseBankingBlock('sign in'));
+    }
+
     const lockedUntil = user.loginAttempts?.lockedUntil
       ? new Date(user.loginAttempts.lockedUntil).getTime()
       : 0;
@@ -87,10 +92,6 @@ router.post('/login', async (req, res) => {
     const lifecycle = accountLifecycleBlock(user);
     if (lifecycle) {
       return res.status(403).json(lifecycle);
-    }
-
-    if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock('sign in'));
     }
 
     const token = signToken(user);

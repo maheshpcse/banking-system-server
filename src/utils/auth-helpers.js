@@ -180,7 +180,7 @@ function staffAccessBlock(user) {
 function superAdminUseConsoleBlock(action = 'sign in') {
   return {
     code: 'USE_CONSOLE_LOGIN',
-    message: `Super Admin accounts cannot ${action} through the Banking or Billing portal. Use the Apex Console at ${CONSOLE_LOGIN_PATH}.`
+    message: `Access denied. Super Admin accounts cannot ${action} through the Banking or Billing portal. Open Apex Console at ${CONSOLE_LOGIN_PATH}.`
   };
 }
 
@@ -188,7 +188,7 @@ function superAdminUseConsoleBlock(action = 'sign in') {
 function nonSuperAdminUseBankingBlock(action = 'sign in') {
   return {
     code: 'USE_BANKING_LOGIN',
-    message: `Only Super Admin can ${action} through the Apex Console. Customers, managers, and admins must use the Banking login at /auth/login.`
+    message: `Access denied. Only Super Admin can ${action} through the Apex Console. Customers, managers, and admins must use Banking login at /auth/login.`
   };
 }
 
