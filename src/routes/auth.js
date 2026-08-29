@@ -397,7 +397,7 @@ router.post('/login', async (req, res) => {
     }
 
     if (user.isSuperAdmin) {
-      return res.status(403).json(superAdminUseConsoleBlock());
+      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
     }
 
     const staffBlock = staffAccessBlock(user);
@@ -445,6 +445,10 @@ router.post('/otp/request', async (req, res) => {
       });
     }
     await hydrateUser(user);
+
+    if (user.isSuperAdmin) {
+      return res.status(403).json(superAdminUseConsoleBlock('request an OTP'));
+    }
 
     const lifecycle = accountLifecycleBlock(user);
     if (lifecycle) {
@@ -585,7 +589,7 @@ router.post('/otp/verify', async (req, res) => {
     }
 
     if (user.isSuperAdmin) {
-      return res.status(403).json(superAdminUseConsoleBlock());
+      return res.status(403).json(superAdminUseConsoleBlock('sign in'));
     }
 
     const staffBlock = staffAccessBlock(user);
@@ -621,6 +625,10 @@ router.post('/forgot-password', async (req, res) => {
     const user = await findByIdentifier(identifier);
     if (!user) {
       return res.status(404).json({ message: 'No account found for that username or email' });
+    }
+
+    if (user.isSuperAdmin) {
+      return res.status(403).json(superAdminUseConsoleBlock('reset a password'));
     }
 
     // Blocked / deactivated loginStatus cannot reset password. Soft-deleted accounts may continue
@@ -820,6 +828,10 @@ router.post('/reset-password', async (req, res) => {
     const user = await User.findById(payload.sub);
     if (!user) {
       return res.status(404).json({ message: 'Account not found' });
+    }
+
+    if (user.isSuperAdmin) {
+      return res.status(403).json(superAdminUseConsoleBlock('reset a password'));
     }
 
     if (effectiveLoginStatus(user) === 'blocked' || effectiveLoginStatus(user) === 'deactivated') {

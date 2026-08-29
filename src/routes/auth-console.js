@@ -90,7 +90,7 @@ router.post('/login', async (req, res) => {
     }
 
     if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock());
+      return res.status(403).json(nonSuperAdminUseBankingBlock('sign in'));
     }
 
     const token = signToken(user);
@@ -133,7 +133,7 @@ router.post('/otp/request', async (req, res) => {
     await hydrateUser(user);
 
     if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock());
+      return res.status(403).json(nonSuperAdminUseBankingBlock('request an OTP'));
     }
 
     const lifecycle = accountLifecycleBlock(user);
@@ -219,7 +219,7 @@ router.post('/otp/verify', async (req, res) => {
     await hydrateUser(user);
 
     if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock());
+      return res.status(403).json(nonSuperAdminUseBankingBlock('verify an OTP'));
     }
 
     if (String(user.loginOtp.channel || '') !== 'email') {
@@ -293,7 +293,7 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock());
+      return res.status(403).json(nonSuperAdminUseBankingBlock('reset a password'));
     }
 
     const loginStatus = effectiveLoginStatus(user);
@@ -347,7 +347,7 @@ router.post('/reset-password', async (req, res) => {
     }
 
     if (!user.isSuperAdmin) {
-      return res.status(403).json(nonSuperAdminUseBankingBlock());
+      return res.status(403).json(nonSuperAdminUseBankingBlock('reset a password'));
     }
 
     if (effectiveLoginStatus(user) === 'blocked' || effectiveLoginStatus(user) === 'deactivated') {

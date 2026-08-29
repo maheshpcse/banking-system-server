@@ -177,19 +177,18 @@ function staffAccessBlock(user) {
 }
 
 /** Banking portal rejects Super Admin — they must use Console login. */
-function superAdminUseConsoleBlock() {
+function superAdminUseConsoleBlock(action = 'sign in') {
   return {
     code: 'USE_CONSOLE_LOGIN',
-    message: `Super Admin accounts must sign in at the Console login (${CONSOLE_LOGIN_PATH}).`
+    message: `Super Admin accounts cannot ${action} through the Banking or Billing portal. Use the Apex Console at ${CONSOLE_LOGIN_PATH}.`
   };
 }
 
 /** Console portal rejects non–Super Admin — they must use banking login. */
-function nonSuperAdminUseBankingBlock() {
+function nonSuperAdminUseBankingBlock(action = 'sign in') {
   return {
     code: 'USE_BANKING_LOGIN',
-    message:
-      'This Console login is for Super Admin only. Use the banking login for customers, managers, and admins.'
+    message: `Only Super Admin can ${action} through the Apex Console. Customers, managers, and admins must use the Banking login at /auth/login.`
   };
 }
 
