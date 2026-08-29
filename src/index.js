@@ -5,10 +5,12 @@ const cors = require('cors');
 const morgan = require('morgan');
 const { connectDB } = require('./config/db');
 const authRoutes = require('./routes/auth');
+const authConsoleRoutes = require('./routes/auth-console');
 const accountRoutes = require('./routes/account');
 const transactionRoutes = require('./routes/transactions');
 const notificationRoutes = require('./routes/notifications');
 const adminRoutes = require('./routes/admin');
+const adminDemoRoutes = require('./routes/admin-demo');
 const billingRoutes = require('./routes/billing');
 
 const app = express();
@@ -49,10 +51,12 @@ app.get('/api/v1/health/live', (_req, res) => {
   res.json({ status: 'ok', service: 'banking-system-server' });
 });
 
+app.use('/api/auth/console', authConsoleRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin/demo', adminDemoRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/billing', billingRoutes);
 

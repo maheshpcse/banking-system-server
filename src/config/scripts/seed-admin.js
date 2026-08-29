@@ -61,13 +61,14 @@ async function main() {
     console.log(`Updated existing user to ${role}: ${username} / ${email}`);
   }
 
-  console.log('Sign in on the same Login page with:');
+  console.log('Sign in at Super Admin Console:');
+  console.log(`  path:     /auth/console/login`);
   console.log(`  username: ${username}`);
   console.log(`  password: ${password}`);
   console.log(
     role === 'manager'
-      ? 'Managers are redirected to /manager after login.'
-      : 'Super Admin is redirected to /admin after login.'
+      ? 'Managers should use the banking login and are redirected to /manager after login.'
+      : 'Super Admin uses Console login and is redirected to the Super Admin portal after login.'
   );
 
   await mongoose.disconnect();
