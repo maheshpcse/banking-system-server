@@ -44,11 +44,35 @@ app.use(express.json({ limit: '2mb' }));
 app.use(morgan('dev'));
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'minimal-banking-api' });
+  res.json({
+    status: 'ok',
+    service: 'minimal-banking-api',
+    features: {
+      consoleAuth: true,
+      portalGates: true
+    },
+    build: {
+      consoleAuthRoutes: '/api/auth/console',
+      portalGateCodes: ['USE_CONSOLE_LOGIN', 'USE_BANKING_LOGIN']
+    }
+  });
 });
 
 app.get('/api/v1/health/live', (_req, res) => {
-  res.json({ status: 'ok', service: 'banking-system-server' });
+  res.json({
+    status: 'ok',
+    service: 'banking-system-server',
+    features: { consoleAuth: true, portalGates: true }
+  });
+});
+
+/* Explicit probe — confirms Apex Console auth router is mounted. */
+app.get('/api/auth/console', (_req, res) => {
+  res.json({
+    ok: true,
+    portal: 'apex-console',
+    routes: ['/login', '/otp/request', '/otp/verify', '/forgot-password', '/reset-password']
+  });
 });
 
 app.use('/api/auth/console', authConsoleRoutes);
