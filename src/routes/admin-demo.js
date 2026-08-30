@@ -1,5 +1,4 @@
 const express = require('express');
-const { faker } = require('@faker-js/faker');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const BillingProduct = require('../models/BillingProduct');
@@ -7,6 +6,13 @@ const BillingCustomer = require('../models/BillingCustomer');
 const BillingCoupon = require('../models/BillingCoupon');
 
 const router = express.Router();
+
+// @faker-js/faker is an ES Module, so it must be loaded via dynamic import()
+// rather than require(). We load it once and reuse the resolved instance.
+let faker;
+const fakerReady = (async () => {
+  ({ faker } = await import('@faker-js/faker'));
+})();
 
 const DEMO_PASSWORD = 'Demo@12345';
 const DEFAULT_COUNT = 8;
@@ -149,8 +155,9 @@ function generateCoupons(count) {
   return items;
 }
 
-router.post('/generate', (req, res) => {
+router.post('/generate', async (req, res) => {
   try {
+    await fakerReady;
     const users = clampCount(req.body?.users);
     const products = clampCount(req.body?.products);
     const customers = clampCount(req.body?.customers);
