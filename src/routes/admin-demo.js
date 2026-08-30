@@ -7,6 +7,8 @@ const BillingCoupon = require('../models/BillingCoupon');
 
 const router = express.Router();
 
+// @faker-js/faker is an ES Module, so it must be loaded via a lazy dynamic import
+// rather than require(). We cache the promise so the module is resolved once.
 const DEMO_PASSWORD = 'Demo@12345';
 const DEFAULT_COUNT = 8;
 const MAX_COUNT = 40;
