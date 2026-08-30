@@ -1,5 +1,4 @@
 const express = require('express');
-const { faker } = require('@faker-js/faker');
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const BillingProduct = require('../models/BillingProduct');
@@ -26,6 +25,14 @@ const COUPON_KINDS = BillingCoupon.COUPON_KINDS || ['general', 'payment', 'bank'
 const DISCOUNT_TYPES = BillingCoupon.DISCOUNT_TYPES || ['percent', 'fixed'];
 const PAYMENT_SCOPES = BillingCoupon.PAYMENT_SCOPES || ['any', 'cash', 'card', 'upi', 'qr', 'bank'];
 
+let fakerModulePromise;
+async function getFaker() {
+  if (!fakerModulePromise) {
+    fakerModulePromise = import('@faker-js/faker').then((mod) => mod.faker);
+  }
+  return fakerModulePromise;
+}
+
 router.use(auth);
 
 function requireSuperAdmin(req, res, next) {
@@ -45,11 +52,11 @@ function clampCount(value, fallback = DEFAULT_COUNT) {
   return Math.min(MAX_COUNT, Math.floor(n));
 }
 
-function tempId(prefix, index) {
+function tempId(faker, prefix, index) {
   return `${prefix}-${Date.now().toString(36)}-${index}-${faker.string.alphanumeric(4)}`;
 }
 
-function slugUsername(base, index) {
+function slugUsername(faker, base, index) {
   const clean = String(base || 'staff')
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, '')
@@ -57,16 +64,16 @@ function slugUsername(base, index) {
   return `${clean || 'staff'}${index}${faker.string.alphanumeric(3)}`.toLowerCase();
 }
 
-function generateUsers(count) {
+function generateUsers(faker, count) {
   const items = [];
   for (let i = 0; i < count; i += 1) {
     const role = i % 2 === 0 ? 'manager' : 'admin';
     const first = faker.person.firstName();
     const last = faker.person.lastName();
     const fullName = `${first} ${last}`;
-    const username = slugUsername(`${first}.${last}`, i);
+    const username = slugUsername(faker, `${first}.${last}`, i);
     items.push({
-      tempId: tempId('user', i),
+      tempId: tempId(faker, 'user', i),
       fullName,
       username,
       email: faker.internet.email({ firstName: first, lastName: last }).toLowerCase(),
@@ -78,13 +85,13 @@ function generateUsers(count) {
   return items;
 }
 
-function generateProducts(count) {
+function generateProducts(faker, count) {
   const items = [];
   for (let i = 0; i < count; i += 1) {
     const name = faker.commerce.productName();
     const sku = `NV-${faker.string.alphanumeric({ length: 3, casing: 'upper' })}-${String(i + 1).padStart(2, '0')}`;
     items.push({
-      tempId: tempId('product', i),
+      tempId: tempId(faker, 'product', i),
       name,
       sku,
       price: Number(faker.commerce.price({ min: 5, max: 250, dec: 2 })),
@@ -97,14 +104,14 @@ function generateProducts(count) {
   return items;
 }
 
-function generateCustomers(count) {
+function generateCustomers(faker, count) {
   const items = [];
   for (let i = 0; i < count; i += 1) {
     const first = faker.person.firstName();
     const last = faker.person.lastName();
     const includeBank = i % 3 === 0;
     items.push({
-      tempId: tempId('customer', i),
+      tempId: tempId(faker, 'customer', i),
       name: `${first} ${last}`,
       email: faker.internet.email({ firstName: first, lastName: last }).toLowerCase(),
       phone: faker.phone.number({ style: 'international' }).replace(/\s+/g, '').slice(0, 32),
@@ -118,7 +125,7 @@ function generateCustomers(count) {
   return items;
 }
 
-function generateCoupons(count) {
+function generateCoupons(faker, count) {
   const items = [];
   for (let i = 0; i < count; i += 1) {
     const kind = faker.helpers.arrayElement(COUPON_KINDS);
@@ -134,7 +141,7 @@ function generateCoupons(count) {
           ? ['bank', 'card', 'upi']
           : ['any'];
     items.push({
-      tempId: tempId('coupon', i),
+      tempId: tempId(faker, 'coupon', i),
       code: `${faker.string.alpha({ length: 4, casing: 'upper' })}${faker.string.numeric(3)}`,
       title: faker.commerce.productAdjective() + ' ' + faker.commerce.department() + ' Deal',
       kind,
@@ -149,8 +156,9 @@ function generateCoupons(count) {
   return items;
 }
 
-router.post('/generate', (req, res) => {
+router.post('/generate', async (req, res) => {
   try {
+    const faker = await getFaker();
     const users = clampCount(req.body?.users);
     const products = clampCount(req.body?.products);
     const customers = clampCount(req.body?.customers);
@@ -159,10 +167,10 @@ router.post('/generate', (req, res) => {
     return res.json({
       message: 'Demo preview generated (not persisted). Review and commit selected rows.',
       counts: { users, products, customers, coupons },
-      users: generateUsers(users),
-      products: generateProducts(products),
-      customers: generateCustomers(customers),
-      coupons: generateCoupons(coupons)
+      users: generateUsers(faker, users),
+      products: generateProducts(faker, products),
+      customers: generateCustomers(faker, customers),
+      coupons: generateCoupons(faker, coupons)
     });
   } catch (error) {
     console.error('Demo generate error:', error);
