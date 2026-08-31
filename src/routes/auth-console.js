@@ -290,7 +290,10 @@ router.post('/forgot-password', async (req, res) => {
 
     const user = await findByIdentifier(identifier);
     if (!user) {
-      return res.status(404).json({ message: 'No account found for that username or email' });
+      return res.status(404).json({
+        code: 'USER_NOT_FOUND',
+        message: 'No account found for that username or email'
+      });
     }
 
     if (!user.isSuperAdmin) {
@@ -327,8 +330,8 @@ router.post('/reset-password', async (req, res) => {
       return res.status(400).json({ message: 'Passwords do not match' });
     }
 
-    if (String(password).length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    if (String(password).length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters' });
     }
 
     let payload;
@@ -344,7 +347,10 @@ router.post('/reset-password', async (req, res) => {
 
     const user = await User.findById(payload.sub);
     if (!user) {
-      return res.status(404).json({ message: 'Account not found' });
+      return res.status(404).json({
+        code: 'USER_NOT_FOUND',
+        message: 'Account not found'
+      });
     }
 
     if (!user.isSuperAdmin) {
